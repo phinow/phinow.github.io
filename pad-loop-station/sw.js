@@ -1,5 +1,5 @@
 // Keeps the app working offline. Bump VERSION when files change so phones and laptops pick up the update.
-const VERSION = "pad-loop-station-v2";
+const VERSION = "pad-loop-station-v3";
 const FILES = [
   "./",
   "index.html",
@@ -18,7 +18,12 @@ const FILES = [
 ];
 
 self.addEventListener("install", (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
+  // cache: "reload" skips the browser's own HTTP cache so a new version never stores old files
+  e.waitUntil(
+    caches.open(VERSION)
+      .then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: "reload" }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener("activate", (e) => {
@@ -35,7 +40,7 @@ self.addEventListener("fetch", (e) => {
   if (req.method !== "GET" || new URL(req.url).origin !== location.origin) return;
   e.respondWith(
     caches.match(req, { ignoreSearch: true }).then((hit) => {
-      const fresh = fetch(req).then((res) => {
+      const fresh = fetch(req, { cache: "no-cache" }).then((res) => {
         if (res.ok) { const copy = res.clone(); caches.open(VERSION).then((c) => c.put(req, copy)); }
         return res;
       }).catch(() => hit);
