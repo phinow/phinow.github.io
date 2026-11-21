@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Pad Station">
+<script>try { var s = JSON.parse(localStorage.getItem("pad-loop-station:v1") || "{}"); document.documentElement.dataset.theme = s.invert ? "light" : "dark"; } catch (e) {}</script>
 <style>
 @font-face { font-family: "Barlow Condensed"; font-weight: 600; font-display: swap; src: url("fonts/barlow-condensed-latin-600-normal.woff2") format("woff2"); }
 @font-face { font-family: "Barlow Condensed"; font-weight: 700; font-display: swap; src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2"); }
@@ -28,7 +29,23 @@
   --muted: #9c9c9c;
   --display: "Barlow Condensed", "Arial Narrow", sans-serif;
   --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --on-ink-muted: #444;
+  --glow: rgba(255, 255, 255, 0.2);
+  --hover-fill: rgba(255, 255, 255, 0.06);
   color-scheme: dark;
+}
+/* Inverted: white page, black ink */
+:root[data-theme="light"] {
+  --bg: #f7f7f7;
+  --panel: #ffffff;
+  --raise: #f0f0f0;
+  --line: #cfcfcf;
+  --ink: #0b0b0b;
+  --muted: #5e5e5e;
+  --on-ink-muted: #b8b8b8;
+  --glow: rgba(0, 0, 0, 0.16);
+  --hover-fill: rgba(0, 0, 0, 0.05);
+  color-scheme: light;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.45; }
@@ -53,7 +70,7 @@ button { cursor: pointer; }
 .label { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
 
 .drop { border: 1.5px dashed var(--line); border-radius: 10px; padding: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.drop.over { border-color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.drop.over { border-color: var(--ink); background: var(--hover-fill); }
 .drop p { margin: 0; color: var(--muted); font-size: 13px; }
 .btn { border: 1px solid var(--line); background: var(--raise); border-radius: 8px; padding: 9px 14px; font-weight: 500; }
 .btn:hover { border-color: var(--muted); }
@@ -115,8 +132,8 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 .key .main { font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1; }
 .key .alt { font-size: 11px; color: var(--muted); min-height: 1em; }
 .key:hover { border-color: var(--muted); }
-.key[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18), 0 0 26px rgba(255, 255, 255, 0.22); }
-.key[aria-pressed="true"] .alt { color: #444; }
+.key[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); box-shadow: 0 0 0 3px var(--glow), 0 0 26px var(--glow); }
+.key[aria-pressed="true"] .alt { color: var(--on-ink-muted); }
 .pad-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .pad-status p { margin: 0; font-size: 14px; color: var(--muted); }
 .pad-status p strong { color: var(--ink); font-weight: 600; }
@@ -128,6 +145,10 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 .foot a { color: var(--muted); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 [hidden] { display: none !important; }
+.btn[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: var(--ink); color: var(--bg); padding: 12px 18px; border-radius: 10px; font-size: 14px; font-weight: 500; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); z-index: 20; }
+.drop-overlay { position: fixed; inset: 12px; border: 3px dashed var(--ink); border-radius: 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); display: flex; align-items: center; justify-content: center; z-index: 10; pointer-events: none; }
+.drop-overlay p { font-family: var(--display); font-weight: 700; font-size: clamp(28px, 5vw, 48px); letter-spacing: 0.04em; text-transform: uppercase; margin: 0; }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @media (prefers-reduced-motion: reduce) { .loop.heard .dot { animation: none; } .beats span { transition: none; } }
@@ -146,6 +167,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
       <input type="range" id="master" min="0" max="1" step="0.01">
       <output id="master-out" for="master"></output>
     </div>
+    <button class="btn" id="invert" aria-pressed="false">Invert colours</button>
     <button class="btn strong" id="install" hidden>Install app</button>
     <span class="pill" id="audio-pill">Sound starts on your first tap</span>
   </div>
@@ -156,17 +178,17 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
   <section class="panel" aria-labelledby="loops-h">
     <div class="panel-head">
       <h2 id="loops-h">Loops</h2>
-      <span class="hint">MP3, WAV or M4A. Loops repeat with no gap.</span>
+      <span class="hint">MP3, WAV, M4A or AIFF. Loops repeat with no gap.</span>
     </div>
 
     <div class="drop" id="drop">
-      <p>Drop loop files here, or</p>
+      <p>Drop loop files or a whole folder anywhere on this page, or</p>
       <label class="btn strong" for="file-in">Add loop files</label>
-      <input type="file" id="file-in" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.flac,.ogg" multiple class="sr">
+      <input type="file" id="file-in" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.aifc,.flac,.ogg,.caf" multiple class="sr">
     </div>
 
     <div>
-      <p class="label">Your loops <span id="lib-note"></span></p>
+      <p class="label">Your loops</p>
       <ul class="loop-list" id="loop-list"></ul>
       <p class="empty" id="loop-empty" hidden>No loops yet. Add one above.</p>
     </div>
@@ -257,6 +279,9 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     </div>
   </section>
 </main>
+
+<div class="drop-overlay" id="drop-overlay" hidden><p>Drop to add loops</p></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <footer class="foot">
   <span>Keys: Space plays or stops the loop. Esc stops the pad.</span>

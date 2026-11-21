@@ -3,7 +3,8 @@
 A black and white web app for church: loops on the left, worship pads on the right.
 
 - **Pads:** all 12 keys. Tap a key to start, tap another to crossfade, and press Stop pad (or Esc) to cut it off at once. Four sounds: Warm, Shimmer, Strings and Air. Three chords: Open (root and fifth, fits major and minor songs), Major and Minor. The pads are made live in the browser, so there are no pad files and no loop point.
-- **Loops:** add MP3, WAV or M4A files. They loop with no gap and stay saved in the browser on that device. Set the tempo with +/-, the slider or Tap tempo; the pitch stays the same. Each loop's own BPM is read from the file name (for example `Afro 98bpm.wav`) or worked out from its length. Check it and type over it if it's wrong. While a loop plays, tap another one and it switches at the next bar, at the end of the loop, or straight away.
+- **Loops:** add MP3, WAV, M4A or AIFF files, or drag in a whole folder. Drop them anywhere on the page. They loop with no gap and stay saved in the browser on that device. Set the tempo with +/-, the slider or Tap tempo; the pitch stays the same. Each loop's own BPM is read from the file name (for example `Afro 98bpm.wav`) or worked out from its length. Check it and type over it if it's wrong. While a loop plays, tap another one and it switches at the next bar, at the end of the loop, or straight away.
+- **Invert colours:** the button at the top switches between white on black and black on white. It remembers your choice.
 - **Works offline:** after you open it once, it opens with no internet.
 
 ## Open it

@@ -75,15 +75,62 @@ const DB = {
 let lib = [];
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
 
-function decode(ab) {
+function decodeNative(ab) {
   return new Promise((res, rej) => {
     const p = ctx.decodeAudioData(ab, res, rej);
     if (p && p.then) p.then(res, rej);
   });
 }
 
+// AIFF / AIFC (uncompressed) reader, resampled to the device rate
+async function decodeAiff(ab) {
+  const v = new DataView(ab);
+  const id = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
+  if (v.byteLength < 12 || id(0) !== "FORM" || !/^AIF[FC]$/.test(id(8))) return null;
+  const ext80 = (o) => {
+    const se = v.getUint16(o), exp = se & 0x7fff, hi = v.getUint32(o + 2), lo = v.getUint32(o + 6);
+    if (!exp && !hi && !lo) return 0;
+    return (se & 0x8000 ? -1 : 1) * (hi * 4294967296 + lo) * Math.pow(2, exp - 16383 - 63);
+  };
+  let o = 12, ch = 0, frames = 0, bits = 0, sr = 0, data = -1, comp = "NONE";
+  while (o + 8 <= v.byteLength) {
+    const ck = id(o), sz = v.getUint32(o + 4), d = o + 8;
+    if (ck === "COMM") { ch = v.getInt16(d); frames = v.getUint32(d + 2); bits = v.getInt16(d + 6); sr = ext80(d + 8); if (id(8) === "AIFC") comp = id(d + 18); }
+    else if (ck === "SSND") data = d + 8 + v.getUint32(d);
+    o = d + sz + (sz & 1);
+  }
+  if (data < 0 || !ch || !frames || !sr || !["NONE", "sowt", "twos"].includes(comp) || bits < 8 || bits > 32) return null;
+  const bytes = Math.ceil(bits / 8), le = comp === "sowt", full = Math.pow(2, bytes * 8 - 1);
+  frames = Math.min(frames, Math.floor((v.byteLength - data) / (bytes * ch)));
+  const src = ctx.createBuffer(ch, frames, sr);
+  const outs = []; for (let c = 0; c < ch; c++) outs.push(src.getChannelData(c));
+  let p = data;
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < ch; c++) {
+      let x = 0;
+      for (let b = 0; b < bytes; b++) x = x * 256 + v.getUint8(p + (le ? bytes - 1 - b : b));
+      if (x >= full) x -= full * 2;
+      outs[c][i] = x / full; p += bytes;
+    }
+  }
+  if (sr === ctx.sampleRate) return src;
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const oc = new OAC(ch, Math.ceil(frames * ctx.sampleRate / sr), ctx.sampleRate);
+  const s = oc.createBufferSource(); s.buffer = src; s.connect(oc.destination); s.start();
+  return oc.startRendering();
+}
+
+async function decode(ab) {
+  try { return await decodeNative(ab.slice(0)); }
+  catch (e) {
+    const aiff = await decodeAiff(ab);
+    if (aiff) return aiff;
+    throw e;
+  }
+}
+
 async function loopFromData(rec) {
-  const buf = await decode(rec.data.slice(0));
+  const buf = await decode(rec.data);
   const t = trimLossyPadding(buf, rec.name);
   const len = t.L.length;
   const loop = { id: rec.id, name: rec.name, L: t.L, R: t.R || t.L, len, dur: len / buf.sampleRate, sr: buf.sampleRate };
@@ -92,10 +139,18 @@ async function loopFromData(rec) {
   return loopMeta(loop);
 }
 
+const AUDIO_EXT = /\.(mp3|wav|wave|m4a|aac|aif|aiff|aifc|flac|ogg|oga|opus|caf)$/i;
 async function addFiles(files) {
-  await wake();
-  const list = [...files].filter((f) => /^audio\//.test(f.type) || /\.(mp3|wav|wave|m4a|aac|aif|aiff|flac|ogg)$/i.test(f.name));
-  if (!list.length) { flash("Those files are not audio. Use MP3, WAV or M4A."); return; }
+  audio();
+  if (ctx.state !== "running") ctx.resume().catch(() => {});   // never wait on this: decoding works with sound still off
+  const all = [...files].filter((f) => f && !f.name.startsWith("."));
+  const list = all.filter((f) => /^audio\//.test(f.type) || AUDIO_EXT.test(f.name));
+  if (!list.length) {
+    toast(all.length ? "Those aren't audio files. Use MP3, WAV, M4A or AIFF." : "Nothing came through. Drag the files from Finder, or use Add loop files.");
+    return;
+  }
+  toast(`Adding ${list.length} loop${list.length > 1 ? "s" : ""}...`, 60000);
+  let added = 0; const failed = [];
   for (const f of list) {
     try {
       const data = await f.arrayBuffer();
@@ -107,11 +162,45 @@ async function addFiles(files) {
       DB.put(rec);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
       if (!S.selected || !lib.some((l) => l.id === S.selected)) select(loop.id, true);
+      added++;
+      renderLoops();
     } catch (e) {
-      flash(`Could not open ${f.name}. Try saving it as WAV or MP3.`);
+      failed.push(f.name);
     }
   }
-  renderLoops();
+  renderLoops(); renderTempo();
+  const parts = [];
+  if (added) parts.push(`Added ${added} loop${added > 1 ? "s" : ""}.`);
+  if (failed.length) parts.push(`Couldn't open ${failed.join(", ")}. Save ${failed.length > 1 ? "them" : "it"} as WAV or MP3 and try again.`);
+  toast(parts.join(" "), failed.length ? 9000 : 4000);
+}
+
+// Files from a drop, including whole folders. Entries must be read during the drop event itself.
+function dropEntries(dt) {
+  const entries = [];
+  if (dt.items) for (const it of dt.items) {
+    if (it.kind !== "file") continue;
+    const en = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+    if (en) entries.push(en);
+  }
+  return { entries, files: [...(dt.files || [])] };
+}
+async function filesFromEntries({ entries, files }) {
+  if (!entries.length) return files;
+  const out = [];
+  const walk = async (en) => {
+    if (en.isFile) out.push(await new Promise((res, rej) => en.file(res, rej)));
+    else if (en.isDirectory) {
+      const reader = en.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const b of batch) await walk(b);
+      }
+    }
+  };
+  for (const en of entries) { try { await walk(en); } catch (e) { /* unreadable item */ } }
+  return out.length ? out : files;
 }
 
 /* Built-in example so the page works before any files are added */
@@ -151,7 +240,7 @@ function select(id, quiet) {
   if (!loop) return;
   if (loops && loops.playing) {
     const r = loops.queue(loop, S.mode);
-    if (r === "queued" && !quiet) flash(S.mode === "bar" ? "Switching at the next bar" : "Switching at the end of this loop");
+    if (r === "queued" && !quiet) toast(S.mode === "bar" ? "Switching at the next bar" : "Switching at the end of this loop");
   } else if (loops) { loops.loop = loop; loops.applyRatio(); }
   renderLoops(); renderTempo();
 }
@@ -345,12 +434,17 @@ function renderPadState() {
 }
 
 /* ----- Small helpers ----- */
-let flashTimer = 0;
-function flash(msg) {
-  const n = $("#lib-note");
-  n.textContent = "· " + msg;
-  clearTimeout(flashTimer);
-  flashTimer = setTimeout(() => { n.textContent = ""; }, 3500);
+function applyTheme() {
+  document.documentElement.dataset.theme = S.invert ? "light" : "dark";
+  const m = document.querySelector('meta[name="theme-color"]');
+  if (m) m.content = S.invert ? "#f7f7f7" : "#0b0b0b";
+}
+let toastTimer = 0;
+function toast(msg, ms) {
+  const n = $("#toast");
+  n.textContent = msg; n.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { n.hidden = true; }, ms || 3500);
 }
 function bindSlider(id, get, set, show) {
   const el = $("#" + id), out = $("#" + id + "-out");
@@ -361,6 +455,7 @@ function bindSlider(id, get, set, show) {
 
 /* ----- Start up ----- */
 async function init() {
+  applyTheme();
   renderPadControls();
   renderPadState();
   [...$("#mode").children].forEach((b) => {
@@ -383,13 +478,23 @@ async function init() {
     if (loop) setTarget(loop.bpm);
   });
   $("#play").addEventListener("click", () => togglePlay());
+  const inv = $("#invert");
+  inv.setAttribute("aria-pressed", String(!!S.invert));
+  inv.addEventListener("click", () => { S.invert = !S.invert; saveSettings(); applyTheme(); inv.setAttribute("aria-pressed", String(S.invert)); });
   $("#stop-pads").addEventListener("click", stopPad);
   $("#file-in").addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
-  const drop = $("#drop");
-  ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
-  ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
-  document.addEventListener("dragover", (e) => e.preventDefault());
-  document.addEventListener("drop", (e) => { e.preventDefault(); if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files); });
+  const overlay = $("#drop-overlay");
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
+  window.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; overlay.hidden = false; });
+  window.addEventListener("dragover", (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; overlay.hidden = false; });
+  window.addEventListener("dragleave", (e) => { if (!hasFiles(e)) return; dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) overlay.hidden = true; });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault(); dragDepth = 0; overlay.hidden = true;
+    if (!e.dataTransfer) return;
+    const got = dropEntries(e.dataTransfer);
+    filesFromEntries(got).then(addFiles);
+  });
   document.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea" || tag === "select") return;
@@ -425,6 +530,10 @@ init();
 
 /* ----- Installable web app: works offline once opened ----- */
 if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) {
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController) toast("Update installed. Close and reopen the app to use it.", 10000);
+  });
   window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 }
 let installEvt = null;
