@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pad and Loop Station</title>
+<meta name="theme-color" content="#0b0b0b">
+<meta name="description" content="Worship pads in every key and gapless loops with tempo control.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Pad Station">
+<style>
+@font-face { font-family: "Barlow Condensed"; font-weight: 600; font-display: swap; src: url("fonts/barlow-condensed-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: "Barlow Condensed"; font-weight: 700; font-display: swap; src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 400; font-display: swap; src: url("fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 500; font-display: swap; src: url("fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: "IBM Plex Sans"; font-weight: 600; font-display: swap; src: url("fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2"); }
+:root {
+  /* Black and white stage console: loops left, pads right; anything "on" turns solid white */
+  --bg: #0b0b0b;
+  --panel: #141414;
+  --raise: #1c1c1c;
+  --line: #303030;
+  --ink: #f5f5f5;
+  --muted: #9c9c9c;
+  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--body); font-size: 15px; line-height: 1.45; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 18px clamp(16px, 3vw, 32px); border-bottom: 1px solid var(--line); }
+.brand h1 { font-family: var(--display); font-weight: 700; font-size: 30px; letter-spacing: 0.02em; margin: 0; line-height: 1; text-wrap: balance; }
+.brand p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.top-controls { display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap; }
+.pill { font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.pill.on { color: var(--bg); background: var(--ink); border-color: var(--ink); }
+
+.station { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.08fr); gap: 18px; padding: 18px clamp(16px, 3vw, 32px) 8px; }
+@media (max-width: 880px) { .station { grid-template-columns: 1fr; } }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--ink); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.panel-head h2 { font-family: var(--display); font-weight: 600; font-size: 24px; letter-spacing: 0.04em; text-transform: uppercase; margin: 0; }
+.panel-head .hint { color: var(--muted); font-size: 13px; text-align: right; }
+.label { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
+
+.drop { border: 1.5px dashed var(--line); border-radius: 10px; padding: 14px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.drop.over { border-color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.drop p { margin: 0; color: var(--muted); font-size: 13px; }
+.btn { border: 1px solid var(--line); background: var(--raise); border-radius: 8px; padding: 9px 14px; font-weight: 500; }
+.btn:hover { border-color: var(--muted); }
+.btn.strong { border-color: var(--ink); }
+
+.loop-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.loop { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--raise); padding: 6px 6px 6px 4px; }
+.loop[aria-current="true"] { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
+.loop.queued { border-style: dashed; border-color: var(--ink); }
+.loop-pick { display: flex; align-items: center; gap: 10px; border: 0; background: none; text-align: left; padding: 6px 8px; min-width: 0; border-radius: 8px; }
+.loop-pick .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); flex: none; }
+.loop[aria-current="true"] .dot { border-color: var(--ink); background: var(--ink); }
+.loop.heard .dot { animation: pulse 0.9s ease-in-out infinite; }
+.loop-text { min-width: 0; }
+.loop-name { display: block; font-weight: 500; overflow-wrap: anywhere; }
+.loop-sub { display: block; font-size: 12px; color: var(--muted); }
+.bpm-field { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.bpm-field input { width: 68px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); text-align: right; font-variant-numeric: tabular-nums; }
+.loop-remove { border: 0; background: none; color: var(--muted); font-size: 20px; line-height: 1; padding: 6px 10px; border-radius: 6px; }
+.loop-remove:hover { color: var(--ink); background: var(--line); }
+.empty { color: var(--muted); font-size: 13px; margin: 0; }
+
+.transport { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: center; }
+.play { width: 92px; height: 92px; border-radius: 50%; border: 2px solid var(--ink); background: transparent; color: var(--ink); font-family: var(--display); font-size: 22px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.play[aria-pressed="true"] { background: var(--ink); color: var(--bg); }
+.play:disabled { opacity: 0.4; cursor: not-allowed; }
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: none; padding: 8px 12px; font-size: 13px; color: var(--muted); border-right: 1px solid var(--line); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600; }
+
+.tempo-box { border: 1px solid var(--line); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.tempo-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.nudge { width: 52px; height: 52px; border-radius: 10px; border: 1px solid var(--line); background: var(--raise); font-size: 26px; line-height: 1; }
+.readout { text-align: center; flex: 1; }
+.readout .num { font-family: var(--display); font-weight: 700; font-size: 76px; line-height: 0.9; font-variant-numeric: tabular-nums; color: var(--ink); }
+.readout .unit { font-family: var(--display); font-weight: 600; font-size: 20px; letter-spacing: 0.1em; color: var(--muted); margin-left: 6px; }
+.tempo-note { text-align: center; color: var(--muted); font-size: 13px; margin: 0; font-variant-numeric: tabular-nums; }
+.tempo-note.warn { color: var(--ink); font-weight: 600; }
+.tempo-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+input[type="range"] { width: 100%; accent-color: var(--ink); }
+
+.beat { display: flex; align-items: center; gap: 12px; }
+.beats { display: flex; gap: 8px; }
+.beats span { width: 16px; height: 16px; border-radius: 50%; background: var(--line); transition: background 60ms; }
+.beats span.lit { background: var(--muted); }
+.beats span.lit.one { background: var(--ink); }
+.bar-count { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; min-width: 92px; }
+.progress { flex: 1; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--ink); }
+
+.slider-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) 64px; align-items: center; gap: 10px; font-size: 13px; }
+.slider-row label { color: var(--muted); }
+.slider-row output { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+
+.keys { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+@media (max-width: 520px) { .keys { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.key { aspect-ratio: 1 / 0.92; border-radius: 10px; border: 1px solid var(--line); background: var(--raise); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 4px; transition: background 120ms, border-color 120ms; }
+.key .main { font-family: var(--display); font-weight: 700; font-size: 32px; line-height: 1; }
+.key .alt { font-size: 11px; color: var(--muted); min-height: 1em; }
+.key:hover { border-color: var(--muted); }
+.key[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--bg); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18), 0 0 26px rgba(255, 255, 255, 0.22); }
+.key[aria-pressed="true"] .alt { color: #444; }
+.pad-status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.pad-status p { margin: 0; font-size: 14px; color: var(--muted); }
+.pad-status p strong { color: var(--ink); font-weight: 600; }
+.stop-pads { border: 2px solid var(--ink); color: var(--ink); background: transparent; border-radius: 10px; padding: 12px 22px; font-family: var(--display); font-size: 20px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.stop-pads:hover { background: var(--ink); color: var(--bg); }
+.pad-options { display: grid; gap: 14px; }
+
+.foot { padding: 8px clamp(16px, 3vw, 32px) 24px; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.foot a { color: var(--muted); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+[hidden] { display: none !important; }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .loop.heard .dot { animation: none; } .beats span { transition: none; } }
+</style>
+
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Pad and Loop Station</h1>
+    <p>Loops on the left, pads on the right. Works offline once it has been opened.</p>
+  </div>
+  <div class="top-controls">
+    <div class="slider-row" style="grid-template-columns: auto 140px 40px;">
+      <label for="master">Master</label>
+      <input type="range" id="master" min="0" max="1" step="0.01">
+      <output id="master-out" for="master"></output>
+    </div>
+    <button class="btn strong" id="install" hidden>Install app</button>
+    <span class="pill" id="audio-pill">Sound starts on your first tap</span>
+  </div>
+</header>
+
+<main class="station">
+  <!-- LOOPS -->
+  <section class="panel" aria-labelledby="loops-h">
+    <div class="panel-head">
+      <h2 id="loops-h">Loops</h2>
+      <span class="hint">MP3, WAV or M4A. Loops repeat with no gap.</span>
+    </div>
+
+    <div class="drop" id="drop">
+      <p>Drop loop files here, or</p>
+      <label class="btn strong" for="file-in">Add loop files</label>
+      <input type="file" id="file-in" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.flac,.ogg" multiple class="sr">
+    </div>
+
+    <div>
+      <p class="label">Your loops <span id="lib-note"></span></p>
+      <ul class="loop-list" id="loop-list"></ul>
+      <p class="empty" id="loop-empty" hidden>No loops yet. Add one above.</p>
+    </div>
+
+    <div class="transport">
+      <button class="play" id="play" aria-pressed="false">Play</button>
+      <div>
+        <p class="label">Change loop</p>
+        <div class="seg" id="mode" role="group" aria-label="When a new loop starts">
+          <button data-mode="bar">At next bar</button>
+          <button data-mode="loop">At end of loop</button>
+          <button data-mode="now">Straight away</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tempo-box">
+      <div class="tempo-row">
+        <button class="nudge" id="tempo-down" aria-label="Slower by 1 BPM">&minus;</button>
+        <div class="readout" aria-live="polite"><span class="num" id="bpm-num">96</span><span class="unit">BPM</span></div>
+        <button class="nudge" id="tempo-up" aria-label="Faster by 1 BPM">+</button>
+      </div>
+      <label class="sr" for="tempo">Tempo</label>
+      <input type="range" id="tempo" min="40" max="200" step="0.5">
+      <p class="tempo-note" id="tempo-note"></p>
+      <div class="tempo-actions">
+        <button class="btn" id="tap">Tap tempo</button>
+        <button class="btn" id="tempo-reset">Back to loop's own tempo</button>
+      </div>
+    </div>
+
+    <div class="beat" aria-hidden="true">
+      <div class="beats" id="beats"><span></span><span></span><span></span><span></span></div>
+      <span class="bar-count" id="bar-count">Stopped</span>
+      <div class="progress"><i id="progress"></i></div>
+    </div>
+
+    <div class="slider-row">
+      <label for="loop-vol">Loop volume</label>
+      <input type="range" id="loop-vol" min="0" max="1" step="0.01">
+      <output id="loop-vol-out" for="loop-vol"></output>
+    </div>
+  </section>
+
+  <!-- PADS -->
+  <section class="panel" aria-labelledby="pads-h">
+    <div class="panel-head">
+      <h2 id="pads-h">Pads</h2>
+      <span class="hint">Tap a key to start, another to crossfade. Stop cuts it off at once.</span>
+    </div>
+
+    <div class="keys" id="keys" role="group" aria-label="Pad key"></div>
+
+    <div class="pad-status">
+      <p id="pad-status">Pad is off</p>
+      <button class="stop-pads" id="stop-pads">Stop pad</button>
+    </div>
+
+    <div class="pad-options">
+      <div>
+        <p class="label">Sound</p>
+        <div class="seg" id="style" role="group" aria-label="Pad sound"></div>
+      </div>
+      <div>
+        <p class="label">Chord</p>
+        <div class="seg" id="voicing" role="group" aria-label="Pad chord"></div>
+      </div>
+      <div class="slider-row">
+        <label for="tone">Tone</label>
+        <input type="range" id="tone" min="0" max="1" step="0.01">
+        <output id="tone-out" for="tone"></output>
+      </div>
+      <div class="slider-row">
+        <label for="fade">Crossfade</label>
+        <input type="range" id="fade" min="0.5" max="8" step="0.5">
+        <output id="fade-out" for="fade"></output>
+      </div>
+      <div class="slider-row">
+        <label for="space">Space</label>
+        <input type="range" id="space" min="0" max="1" step="0.01">
+        <output id="space-out" for="space"></output>
+      </div>
+      <div class="slider-row">
+        <label for="pad-vol">Pad volume</label>
+        <input type="range" id="pad-vol" min="0" max="1" step="0.01">
+        <output id="pad-vol-out" for="pad-vol"></output>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="foot">
+  <span>Keys: Space plays or stops the loop. Esc stops the pad.</span>
+  <span>Open (1 + 5) has no third, so it fits both major and minor songs.</span>
+  <span>Loop files stay in this browser on this device.</span>
+  <span>Tempo change uses <a href="https://github.com/cutterbl/SoundTouchJS">SoundTouch JS</a> (LGPL-2.1).</span>
+</footer>
+
+<script src="js/soundtouch.js"></script>
+<script>const ST = { SoundTouch, SimpleFilter };</script>
+<script src="js/engine.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
