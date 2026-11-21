@@ -2,9 +2,9 @@
 
 Loop + pad + delicious. A black and white web app for church: loops on the left, worship pads on the right.
 
-- **Pads:** all 12 keys. Tap a key to start, tap another to crossfade, and press Stop pad (or Esc) to cut it off at once. Four sounds: Warm, Shimmer, Strings and Air. Three chords: Open (root and fifth, fits major and minor songs), Major and Minor. The pads are made live in the browser, so there are no pad files and no loop point.
-- **Loop slots:** Worship has 3/4, 4/4 and Finger snap. Praise has Woro, Highlife and Praise. Drop a file on a slot (or tap the slot to choose one). Add more slots with **+ Add a worship loop** or **+ Add a praise loop**, and rename any slot. Keys 1 to 9 pick a slot, Space plays or stops.
-- **Long files:** anything over 30 seconds opens the trimmer. Pick the tempo, 3/4 or 4/4, how many bars (1, 2, 4 or 8) and where it starts, preview it, then keep just that loop. Only the trimmed part is saved, so a big WAV becomes a small loop. Use **Trim** on any slot to shorten a loop later.
+- **Pads:** all 12 keys, four to a row. Tap a key to start, tap another to crossfade, and press Stop pad (or Esc) to cut it off at once. Four sounds: Warm, Shimmer, Strings and Air. Three chords: Open (root and fifth, fits major and minor songs), Major and Minor. The pads are made live in the browser, so there are no pad files and no loop point.
+- **Loop slots:** a 3 by 3 box. Worship: 3/4, 4/4, Finger snap. Praise: Woro, Highlife, Praise. More: three spare slots to fill and rename later. Drop a file on a slot (or tap it to choose one). The ••• button on each slot sets its tempo, trims, replaces, renames or clears it. **+ Slot** adds another. Keys 1 to 9 pick a slot, Space plays or stops.
+- **Long files:** anything over 30 seconds opens the trimmer. Pick the tempo, 3/4 or 4/4, how many bars (1, 2, 4 or 8) and where it starts, preview it, then keep just that loop. Only the trimmed part is saved, so a big WAV becomes a small loop. Use **Trim** in a slot's ••• menu to shorten a loop later.
 - **Tempo:** set it with +/-, the slider or Tap tempo; the pitch stays the same. While a loop plays, pick another and it switches at the next bar, at the end of the loop, or straight away. MP3, WAV, M4A and AIFF all work, and loops stay saved in the browser on that device.
 - **Invert colours:** the button at the top switches between white on black and black on white. It remembers your choice.
 - **Works offline:** after you open it once, it opens with no internet.

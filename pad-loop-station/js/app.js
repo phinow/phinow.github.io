@@ -160,17 +160,22 @@ async function filesFromEntries({ entries, files }) {
 }
 
 /* ----- Loop slots: labelled places for loops, grouped into Worship and Praise ----- */
-const GROUPS = [{ id: "worship", name: "Worship" }, { id: "praise", name: "Praise" }];
+const GROUPS = [{ id: "worship", name: "Worship" }, { id: "praise", name: "Praise" }, { id: "more", name: "More" }];
 const DEFAULT_SLOTS = [
   { id: "w1", group: "worship", label: "3/4", bpb: 3 },
   { id: "w2", group: "worship", label: "4/4", bpb: 4 },
   { id: "w3", group: "worship", label: "Finger snap", bpb: 4 },
   { id: "p1", group: "praise", label: "Woro", bpb: 4 },
   { id: "p2", group: "praise", label: "Highlife", bpb: 4 },
-  { id: "p3", group: "praise", label: "Praise", bpb: 4 }
+  { id: "p3", group: "praise", label: "Praise", bpb: 4 },
+  { id: "x1", group: "more", label: "Extra 1", bpb: 4 },
+  { id: "x2", group: "more", label: "Extra 2", bpb: 4 },
+  { id: "x3", group: "more", label: "Extra 3", bpb: 4 }
 ];
 const LONG_FILE = 30;   // seconds; longer files go through the trimmer
 if (!Array.isArray(S.slots)) S.slots = DEFAULT_SLOTS.map((s) => ({ ...s, loopId: null }));
+// A third row of spare slots, so the loops make a 3 by 3 box
+if (!S.slots.some((s) => s.group === "more")) S.slots.push(...DEFAULT_SLOTS.filter((s) => s.group === "more").map((s) => ({ ...s, loopId: null })));
 
 const slotById = (id) => S.slots.find((s) => s.id === id);
 const loopById = (id) => lib.find((l) => l.id === id);
@@ -360,30 +365,32 @@ let pickSlot = null;
 function pickFileFor(slotId) { pickSlot = slotId; $("#slot-file-in").click(); }
 
 function renderSlots() {
+  closeMenu();
   const wrap = $("#slots");
   wrap.textContent = "";
   const heard = loops && loops.heardState();
   const order = orderedSlots();
   for (const g of GROUPS) {
-    const sec = document.createElement("section");
-    sec.className = "group";
-    sec.setAttribute("aria-label", g.name + " loops");
+    const list = S.slots.filter((s) => s.group === g.id);
+    if (!list.length) continue;
+    const row = document.createElement("section");
+    row.className = "group-row";
+    row.setAttribute("aria-label", g.name + " loops");
     const h = document.createElement("h3");
     h.textContent = g.name;
-    sec.append(h);
-    const ul = document.createElement("ul");
-    ul.className = "slot-list";
-    for (const slot of S.slots.filter((s) => s.group === g.id)) ul.append(slotRow(slot, order.indexOf(slot) + 1, heard));
-    sec.append(ul);
-    sec.append(addSlotControl(g));
-    wrap.append(sec);
+    h.style.gridRow = `1 / span ${Math.ceil(list.length / 3)}`;
+    row.append(h);
+    for (const slot of list) row.append(slotCard(slot, order.indexOf(slot) + 1, heard));
+    wrap.append(row);
   }
   $("#play").disabled = !lib.length;
+  const head = $("#add-slot-wrap");
+  if (head && !head.querySelector("form")) { head.textContent = ""; head.append(addSlotButton(GROUPS[2])); }
 }
 
-function slotRow(slot, num, heard) {
+function slotCard(slot, num, heard) {
   const loop = loopOf(slot);
-  const li = document.createElement("li");
+  const li = document.createElement("div");
   li.className = "slot" + (loop ? "" : " empty");
   li.dataset.slot = slot.id;
   if (loop && slot.id === S.selected) li.setAttribute("aria-current", "true");
@@ -392,39 +399,28 @@ function slotRow(slot, num, heard) {
 
   const main = document.createElement("button");
   main.className = "slot-main";
-  main.innerHTML = '<span class="slot-num"></span><span class="slot-text"><span class="slot-label"></span><span class="slot-file"></span></span>';
+  main.innerHTML = '<span class="slot-top"><span class="slot-num"></span><span class="slot-label"></span></span><span class="slot-file"></span><span class="slot-meta"></span>';
   main.querySelector(".slot-num").textContent = num <= 9 ? num : "";
   main.querySelector(".slot-label").textContent = slot.label;
   if (loop) {
     const queued = loops && loops.pending && loops.pending.loop === loop ? " · up next" : "";
-    main.querySelector(".slot-file").textContent = `${loop.name} · ${loop.dur.toFixed(1)} s · ${loop.bars} bar${loop.bars > 1 ? "s" : ""} of ${loop.bpb}/4 · tempo ${loop.how}${queued}`;
-    main.setAttribute("aria-label", `Play ${slot.label}: ${loop.name}`);
+    main.querySelector(".slot-file").textContent = loop.name;
+    main.querySelector(".slot-meta").textContent = `${fmt(loop.bpm)} BPM · ${loop.bars} bar${loop.bars > 1 ? "s" : ""} of ${loop.bpb}/4${queued}`;
+    main.title = `${loop.name}: ${loop.dur.toFixed(1)} s, tempo ${loop.how}`;
+    main.setAttribute("aria-label", `${slot.label}: ${loop.name}, ${fmt(loop.bpm)} BPM`);
   } else {
-    main.querySelector(".slot-file").textContent = "Empty. Drop a file here, or tap to choose one.";
+    main.querySelector(".slot-file").textContent = "Empty";
+    main.querySelector(".slot-meta").textContent = "Drop a file, or tap";
     main.setAttribute("aria-label", `Choose a file for ${slot.label}`);
   }
   main.addEventListener("click", () => select(slot.id));
 
-  const tools = document.createElement("div");
-  tools.className = "slot-tools";
-  if (loop) {
-    const field = document.createElement("label");
-    field.className = "bpm-field";
-    const inp = document.createElement("input");
-    inp.type = "number"; inp.step = "0.1"; inp.min = "30"; inp.max = "300"; inp.value = fmt(loop.bpm);
-    inp.id = "bpm-" + slot.id;
-    inp.setAttribute("aria-label", `Own tempo of ${slot.label} in BPM`);
-    inp.addEventListener("change", () => setLoopBpm(loop, parseFloat(inp.value)));
-    field.append(inp, document.createTextNode("BPM"));
-    tools.append(field);
-    tools.append(toolBtn("Trim", `Trim ${slot.label}`, () => trimSlot(slot)));
-    tools.append(toolBtn("Replace", `Replace the file in ${slot.label}`, () => pickFileFor(slot.id)));
-  }
-  tools.append(toolBtn("Rename", `Rename ${slot.label}`, () => renameSlot(li, slot)));
-  const rm = toolBtn("×", loop ? `Clear ${slot.label}` : `Remove the ${slot.label} slot`, () => clearSlot(slot.id));
-  rm.classList.add("x");
-  tools.append(rm);
-  li.append(main, tools);
+  const more = document.createElement("button");
+  more.className = "more"; more.textContent = "•••";
+  more.setAttribute("aria-label", `Options for ${slot.label}`);
+  more.setAttribute("aria-expanded", "false");
+  more.addEventListener("click", (e) => { e.stopPropagation(); openMenu(li, slot, more); });
+  li.append(main, more);
 
   // Drop a file straight onto this slot
   li.addEventListener("dragover", (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); li.classList.add("over"); } });
@@ -437,6 +433,45 @@ function slotRow(slot, num, heard) {
   });
   return li;
 }
+
+let openMenuEl = null;
+function closeMenu() {
+  if (!openMenuEl) return;
+  const btn = openMenuEl.parentElement && openMenuEl.parentElement.querySelector(".more");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  openMenuEl.remove(); openMenuEl = null;
+}
+function openMenu(li, slot, btn) {
+  const was = openMenuEl && openMenuEl.parentElement === li;
+  closeMenu();
+  if (was) return;
+  const loop = loopOf(slot);
+  const m = document.createElement("div");
+  m.className = "menu";
+  m.setAttribute("role", "menu");
+  m.addEventListener("click", (e) => e.stopPropagation());
+  if (loop) {
+    const field = document.createElement("label");
+    field.className = "bpm-field";
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.step = "0.1"; inp.min = "30"; inp.max = "300"; inp.value = fmt(loop.bpm);
+    inp.id = "bpm-" + slot.id;
+    inp.addEventListener("change", () => setLoopBpm(loop, parseFloat(inp.value)));
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
+    field.append(document.createTextNode("Own tempo"), inp);
+    m.append(field);
+    m.append(toolBtn("Trim", `Trim ${slot.label}`, () => { closeMenu(); trimSlot(slot); }));
+    m.append(toolBtn("Replace file", `Replace the file in ${slot.label}`, () => { closeMenu(); pickFileFor(slot.id); }));
+  }
+  m.append(toolBtn("Rename", `Rename ${slot.label}`, () => { closeMenu(); renameSlot(li, slot); }));
+  m.append(toolBtn(loop ? "Clear this slot" : "Remove this slot", loop ? `Clear ${slot.label}` : `Remove the ${slot.label} slot`, () => { closeMenu(); clearSlot(slot.id); }));
+  li.append(m);
+  openMenuEl = m;
+  btn.setAttribute("aria-expanded", "true");
+  const first = m.querySelector("input, button"); if (first) first.focus();
+}
+document.addEventListener("click", closeMenu);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openMenuEl) { e.stopPropagation(); closeMenu(); } }, true);
 
 function toolBtn(text, label, fn) {
   const b = document.createElement("button");
@@ -451,7 +486,7 @@ function renameSlot(li, slot) {
   const form = document.createElement("form");
   form.className = "rename";
   const inp = document.createElement("input");
-  inp.value = slot.label; inp.maxLength = 32; inp.id = "rename-" + slot.id;
+  inp.value = slot.label; inp.maxLength = 24; inp.id = "rename-" + slot.id;
   inp.setAttribute("aria-label", "Slot name");
   const ok = document.createElement("button"); ok.className = "tool"; ok.textContent = "Save"; ok.type = "submit";
   form.append(inp, ok);
@@ -461,32 +496,32 @@ function renameSlot(li, slot) {
     if (v) { slot.label = v; if (!loopOf(slot)) slot.bpb = bpbFromLabel(v); saveSettings(); }
     renderSlots();
   });
-  inp.addEventListener("keydown", (e) => { if (e.key === "Escape") renderSlots(); });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); renderSlots(); } });
   main.replaceWith(form);
+  const more = li.querySelector(".more"); if (more) more.hidden = true;
   inp.focus(); inp.select();
 }
 
-function addSlotControl(g) {
-  const box = document.createElement("div");
-  box.className = "add-slot";
+function addSlotButton(g) {
   const btn = document.createElement("button");
-  btn.className = "tool add"; btn.textContent = `+ Add a ${g.name.toLowerCase()} loop`;
+  btn.className = "tool add"; btn.textContent = "+ Slot";
+  btn.setAttribute("aria-label", "Add another loop slot");
   btn.addEventListener("click", () => {
     const form = document.createElement("form");
     form.className = "rename";
     const inp = document.createElement("input");
-    inp.placeholder = g.id === "praise" ? "Name, like Makossa" : "Name, like 6/8";
-    inp.maxLength = 32; inp.id = "new-" + g.id;
+    inp.placeholder = "Name, like Makossa";
+    inp.maxLength = 24; inp.id = "new-" + g.id;
     inp.setAttribute("aria-label", `Name for the new ${g.name.toLowerCase()} loop`);
     const ok = document.createElement("button"); ok.className = "tool"; ok.textContent = "Add"; ok.type = "submit";
     form.append(inp, ok);
-    form.addEventListener("submit", (e) => { e.preventDefault(); const v = inp.value.trim(); if (v) newSlot(g.id, v); renderSlots(); });
-    inp.addEventListener("keydown", (e) => { if (e.key === "Escape") renderSlots(); });
+    const done = () => { form.replaceWith(addSlotButton(g)); renderSlots(); };
+    form.addEventListener("submit", (e) => { e.preventDefault(); const v = inp.value.trim(); if (v) newSlot(g.id, v); done(); });
+    inp.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); done(); } });
     btn.replaceWith(form);
     inp.focus();
   });
-  box.append(btn);
-  return box;
+  return btn;
 }
 
 /* ----- Trimmer: keep one loop's worth of a long file ----- */

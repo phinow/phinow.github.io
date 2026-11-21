@@ -1,5 +1,5 @@
 // Keeps the app working offline. Bump VERSION when files change so phones and laptops pick up the update.
-const VERSION = "pad-loop-station-v4";
+const VERSION = "pad-loop-station-v5";
 const FILES = [
   "./",
   "index.html",
