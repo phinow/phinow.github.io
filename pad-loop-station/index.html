@@ -3,17 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pad and Loop Station</title>
+<title>Loopadicious</title>
 <meta name="theme-color" content="#0b0b0b">
-<meta name="description" content="Worship pads in every key and gapless loops with tempo control.">
+<meta name="description" content="Loopadicious: worship pads in every key and gapless loops with tempo control.">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png" type="image/png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Pad Station">
+<meta name="apple-mobile-web-app-title" content="Loopadicious">
 <script>try { var s = JSON.parse(localStorage.getItem("pad-loop-station:v1") || "{}"); document.documentElement.dataset.theme = s.invert ? "light" : "dark"; } catch (e) {}</script>
 <style>
+@font-face { font-family: "Unbounded"; font-weight: 800; font-display: swap; src: url("fonts/unbounded-latin-800-normal.woff2") format("woff2"); }
+@font-face { font-family: "Unbounded"; font-weight: 700; font-display: swap; src: url("fonts/unbounded-latin-700-normal.woff2") format("woff2"); }
 @font-face { font-family: "Barlow Condensed"; font-weight: 600; font-display: swap; src: url("fonts/barlow-condensed-latin-600-normal.woff2") format("woff2"); }
 @font-face { font-family: "Barlow Condensed"; font-weight: 700; font-display: swap; src: url("fonts/barlow-condensed-latin-700-normal.woff2") format("woff2"); }
 @font-face { font-family: "IBM Plex Sans"; font-weight: 400; font-display: swap; src: url("fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2"); }
@@ -27,6 +29,7 @@
   --line: #303030;
   --ink: #f5f5f5;
   --muted: #9c9c9c;
+  --logo: "Unbounded", "Avenir Next", system-ui, sans-serif;
   --display: "Barlow Condensed", "Arial Narrow", sans-serif;
   --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --on-ink-muted: #444;
@@ -54,8 +57,8 @@ button { cursor: pointer; }
 :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
 .top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 18px clamp(16px, 3vw, 32px); border-bottom: 1px solid var(--line); }
-.brand h1 { font-family: var(--display); font-weight: 700; font-size: 30px; letter-spacing: 0.02em; margin: 0; line-height: 1; text-wrap: balance; }
-.brand p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.brand h1 { font-family: var(--logo); font-weight: 800; font-size: clamp(34px, 4.4vw, 54px); letter-spacing: -0.02em; margin: 0; line-height: 1; }
+.brand p { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 .top-controls { display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap; }
 .pill { font-size: 12px; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
 .pill.on { color: var(--bg); background: var(--ink); border-color: var(--ink); }
@@ -76,7 +79,31 @@ button { cursor: pointer; }
 .btn:hover { border-color: var(--muted); }
 .btn.strong { border-color: var(--ink); }
 
-.loop-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.slots { display: flex; flex-direction: column; gap: 18px; }
+.group h3 { font-family: var(--display); font-weight: 600; font-size: 18px; letter-spacing: 0.08em; text-transform: uppercase; margin: 0 0 8px; color: var(--muted); }
+.slot-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.slot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--raise); padding: 6px; }
+.slot.empty { border-style: dashed; background: transparent; }
+.slot[aria-current="true"] { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
+.slot.queued { border-style: dashed; border-color: var(--ink); }
+.slot.over { border-color: var(--ink); background: var(--hover-fill); border-style: solid; }
+.slot-main { flex: 1 1 260px; display: flex; align-items: center; gap: 12px; border: 0; background: none; text-align: left; padding: 6px 8px; min-width: 0; border-radius: 8px; }
+.slot-num { flex: none; width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--line); display: grid; place-items: center; font-family: var(--display); font-weight: 700; font-size: 17px; color: var(--muted); }
+.slot[aria-current="true"] .slot-num { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.slot.heard .slot-num { animation: pulse 0.9s ease-in-out infinite; }
+.slot-text { min-width: 0; }
+.slot-label { display: block; font-weight: 600; font-size: 16px; }
+.slot-file { display: block; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.slot-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.tool { border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 6px 10px; font-size: 13px; color: var(--ink); }
+.tool:hover { border-color: var(--muted); }
+.tool.x { border-color: transparent; background: none; color: var(--muted); font-size: 18px; line-height: 1; padding: 4px 9px; }
+.tool.x:hover { color: var(--ink); background: var(--line); }
+.tool.add { border-style: dashed; background: none; color: var(--muted); }
+.rename { flex: 1 1 260px; display: flex; gap: 6px; padding: 4px; }
+.rename input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--ink); background: var(--bg); }
+.add-slot { margin-top: 8px; }
+.add-slot .rename { padding: 0; }
 .loop { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--raise); padding: 6px 6px 6px 4px; }
 .loop[aria-current="true"] { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
 .loop.queued { border-style: dashed; border-color: var(--ink); }
@@ -147,6 +174,16 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 [hidden] { display: none !important; }
 .btn[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); background: var(--ink); color: var(--bg); padding: 12px 18px; border-radius: 10px; font-size: 14px; font-weight: 500; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35); z-index: 20; }
+.trimmer { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 30; }
+.trim-box { width: min(760px, 100%); max-height: calc(100% - 16px); overflow: auto; background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--ink); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); }
+.trim-box h2 { font-family: var(--display); font-weight: 600; font-size: 26px; letter-spacing: 0.04em; text-transform: uppercase; margin: 0; }
+.trim-box p { margin: 0; color: var(--muted); font-size: 14px; }
+#trim-wave { width: 100%; height: 120px; display: block; border: 1px solid var(--line); border-radius: 8px; cursor: ew-resize; touch-action: none; }
+.trim-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.trim-row .bpm-field input { width: 76px; }
+.trim-start { display: flex; align-items: center; gap: 6px; }
+.trim-start output { min-width: 74px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
+.trim-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .drop-overlay { position: fixed; inset: 12px; border: 3px dashed var(--ink); border-radius: 16px; background: color-mix(in srgb, var(--bg) 88%, transparent); display: flex; align-items: center; justify-content: center; z-index: 10; pointer-events: none; }
 .drop-overlay p { font-family: var(--display); font-weight: 700; font-size: clamp(28px, 5vw, 48px); letter-spacing: 0.04em; text-transform: uppercase; margin: 0; }
 
@@ -158,7 +195,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 <body>
 <header class="top">
   <div class="brand">
-    <h1>Pad and Loop Station</h1>
+    <h1>Loopadicious</h1>
     <p>Loops on the left, pads on the right. Works offline once it has been opened.</p>
   </div>
   <div class="top-controls">
@@ -182,15 +219,14 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
     </div>
 
     <div class="drop" id="drop">
-      <p>Drop loop files or a whole folder anywhere on this page, or</p>
+      <p>Drop a file on a slot below, or drop several anywhere to fill the empty slots. Long files open the trimmer.</p>
       <label class="btn strong" for="file-in">Add loop files</label>
       <input type="file" id="file-in" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.aifc,.flac,.ogg,.caf" multiple class="sr">
     </div>
 
     <div>
-      <p class="label">Your loops</p>
-      <ul class="loop-list" id="loop-list"></ul>
-      <p class="empty" id="loop-empty" hidden>No loops yet. Add one above.</p>
+      <div class="slots" id="slots"></div>
+      <input type="file" id="slot-file-in" accept="audio/*,.mp3,.wav,.m4a,.aac,.aif,.aiff,.aifc,.flac,.ogg,.caf" class="sr" tabindex="-1" aria-hidden="true">
     </div>
 
     <div class="transport">
@@ -281,10 +317,37 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 </main>
 
 <div class="drop-overlay" id="drop-overlay" hidden><p>Drop to add loops</p></div>
+<div class="trimmer" id="trimmer" hidden role="dialog" aria-modal="true" aria-labelledby="trim-title">
+  <div class="trim-box">
+    <h2 id="trim-title">Trim loop</h2>
+    <p id="trim-name"></p>
+    <canvas id="trim-wave" aria-label="Waveform. Tap or drag to set where the loop starts."></canvas>
+    <div class="trim-row">
+      <label class="bpm-field">Tempo <input type="number" id="trim-bpm" step="0.1" min="30" max="300"> BPM</label>
+      <div class="seg" id="trim-bpb" role="group" aria-label="Beats per bar"><button data-bpb="3">3/4</button><button data-bpb="4">4/4</button></div>
+      <div class="seg" id="trim-bars" role="group" aria-label="Loop length in bars"><button data-bars="1">1 bar</button><button data-bars="2">2</button><button data-bars="4">4</button><button data-bars="8">8</button></div>
+    </div>
+    <div class="trim-row">
+      <span class="trim-start">Start
+        <button class="tool" id="trim-back-beat" aria-label="Start one beat earlier">&laquo; Beat</button>
+        <button class="tool" id="trim-back" aria-label="Start a little earlier">&lsaquo;</button>
+        <output id="trim-start">0:00.00</output>
+        <button class="tool" id="trim-fwd" aria-label="Start a little later">&rsaquo;</button>
+        <button class="tool" id="trim-fwd-beat" aria-label="Start one beat later">Beat &raquo;</button>
+      </span>
+    </div>
+    <p id="trim-info"></p>
+    <div class="trim-actions">
+      <button class="btn" id="trim-play">Preview</button>
+      <button class="btn" id="trim-cancel">Cancel</button>
+      <button class="btn strong" id="trim-save">Use this loop</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <footer class="foot">
-  <span>Keys: Space plays or stops the loop. Esc stops the pad.</span>
+  <span>Keys: 1 to 9 pick a loop. Space plays or stops it. Esc stops the pad.</span>
   <span>Open (1 + 5) has no third, so it fits both major and minor songs.</span>
   <span>Loop files stay in this browser on this device.</span>
   <span>Tempo change uses <a href="https://github.com/cutterbl/SoundTouchJS">SoundTouch JS</a> (LGPL-2.1).</span>

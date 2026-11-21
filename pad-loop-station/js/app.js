@@ -2,7 +2,7 @@
 const $ = (s) => document.querySelector(s);
 const SETTINGS_KEY = "pad-loop-station:v1";
 const DEFAULTS = {
-  target: 96, mode: "bar", loopVol: 0.85, master: 0.9, selected: null, hideDemo: false,
+  target: 96, mode: "bar", loopVol: 0.85, master: 0.9, selected: null, invert: false,
   pad: { style: "warm", voicing: "open", tone: 0.45, fade: 3, space: 0.55, vol: 0.8 }
 };
 let S = JSON.parse(JSON.stringify(DEFAULTS));
@@ -129,61 +129,17 @@ async function decode(ab) {
   }
 }
 
-async function loopFromData(rec) {
-  const buf = await decode(rec.data);
-  const t = trimLossyPadding(buf, rec.name);
-  const len = t.L.length;
-  const loop = { id: rec.id, name: rec.name, L: t.L, R: t.R || t.L, len, dur: len / buf.sampleRate, sr: buf.sampleRate };
-  if (rec.bpm) { loop.bpm = rec.bpm; loop.how = rec.how || "set by you"; }
-  else { const g = guessBpm(rec.name, t.L, buf.sampleRate, loop.dur); loop.bpm = g.bpm; loop.how = g.how; rec.bpm = g.bpm; rec.how = g.how; }
-  return loopMeta(loop);
-}
-
-const AUDIO_EXT = /\.(mp3|wav|wave|m4a|aac|aif|aiff|aifc|flac|ogg|oga|opus|caf)$/i;
-async function addFiles(files) {
-  audio();
-  if (ctx.state !== "running") ctx.resume().catch(() => {});   // never wait on this: decoding works with sound still off
-  const all = [...files].filter((f) => f && !f.name.startsWith("."));
-  const list = all.filter((f) => /^audio\//.test(f.type) || AUDIO_EXT.test(f.name));
-  if (!list.length) {
-    toast(all.length ? "Those aren't audio files. Use MP3, WAV, M4A or AIFF." : "Nothing came through. Drag the files from Finder, or use Add loop files.");
-    return;
-  }
-  toast(`Adding ${list.length} loop${list.length > 1 ? "s" : ""}...`, 60000);
-  let added = 0; const failed = [];
-  for (const f of list) {
-    try {
-      const data = await f.arrayBuffer();
-      const rec = { id: uid(), name: f.name, data, added: Date.now() };
-      const loop = await loopFromData(rec);
-      loop.name = f.name.replace(/\.[^.]+$/, "");
-      lib = lib.filter((l) => !l.builtin);
-      lib.push(loop);
-      DB.put(rec);
-      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-      if (!S.selected || !lib.some((l) => l.id === S.selected)) select(loop.id, true);
-      added++;
-      renderLoops();
-    } catch (e) {
-      failed.push(f.name);
-    }
-  }
-  renderLoops(); renderTempo();
-  const parts = [];
-  if (added) parts.push(`Added ${added} loop${added > 1 ? "s" : ""}.`);
-  if (failed.length) parts.push(`Couldn't open ${failed.join(", ")}. Save ${failed.length > 1 ? "them" : "it"} as WAV or MP3 and try again.`);
-  toast(parts.join(" "), failed.length ? 9000 : 4000);
-}
+let hideOverlay = () => {};
 
 // Files from a drop, including whole folders. Entries must be read during the drop event itself.
 function dropEntries(dt) {
   const entries = [];
-  if (dt.items) for (const it of dt.items) {
+  if (dt && dt.items) for (const it of dt.items) {
     if (it.kind !== "file") continue;
     const en = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
     if (en) entries.push(en);
   }
-  return { entries, files: [...(dt.files || [])] };
+  return { entries, files: [...((dt && dt.files) || [])] };
 }
 async function filesFromEntries({ entries, files }) {
   if (!entries.length) return files;
@@ -203,125 +159,447 @@ async function filesFromEntries({ entries, files }) {
   return out.length ? out : files;
 }
 
-/* Built-in example so the page works before any files are added */
-async function makeDemo() {
-  const bpm = 96, beats = 8, sr = ctx.sampleRate;
-  const dur = beats * 60 / bpm, len = Math.round(dur * sr);
-  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  const oc = new OAC(2, len, sr);
-  const noise = makeNoise(oc, 1);
-  const step = 60 / bpm / 4;
-  const env = (g, t, peak, d) => { g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(0.0008, t + d); };
-  const kick = (t) => { const o = oc.createOscillator(), g = oc.createGain(); o.frequency.setValueAtTime(110, t); o.frequency.exponentialRampToValueAtTime(42, t + 0.15); env(g, t, 0.9, 0.4); o.connect(g); g.connect(oc.destination); o.start(t); o.stop(t + 0.45); };
-  const hitNoise = (t, type, f, q, peak, d, pan) => {
-    const s = oc.createBufferSource(); s.buffer = noise;
-    const fl = oc.createBiquadFilter(); fl.type = type; fl.frequency.value = f; fl.Q.value = q;
-    const g = oc.createGain(); env(g, t, peak, d);
-    s.connect(fl); fl.connect(g);
-    if (oc.createStereoPanner) { const p = oc.createStereoPanner(); p.pan.value = pan; g.connect(p); p.connect(oc.destination); } else g.connect(oc.destination);
-    s.start(t, Math.random() * 0.5); s.stop(t + d + 0.05);
-  };
-  const tone = (t, f1, f2, peak, d) => { const o = oc.createOscillator(), g = oc.createGain(); o.type = "triangle"; o.frequency.setValueAtTime(f1, t); o.frequency.exponentialRampToValueAtTime(f2, t + d); env(g, t, peak, d); o.connect(g); g.connect(oc.destination); o.start(t); o.stop(t + d + 0.05); };
-  for (let i = 0; i < beats * 4; i++) {
-    const t = i * step;
-    if ([0, 6, 10, 16, 22, 26].includes(i)) kick(t);
-    if (i % 8 === 4) { hitNoise(t, "highpass", 1800, 0.7, 0.32, 0.16, 0); tone(t, 210, 180, 0.2, 0.08); }
-    hitNoise(t, "bandpass", 7000, 1.1, i % 4 === 2 ? 0.13 : 0.055, 0.05, 0.35);
-    if (i === 14 || i === 30) tone(t, 190, 140, 0.35, 0.25);
-    if (i === 15 || i === 31) tone(t, 150, 115, 0.3, 0.25);
+/* ----- Loop slots: labelled places for loops, grouped into Worship and Praise ----- */
+const GROUPS = [{ id: "worship", name: "Worship" }, { id: "praise", name: "Praise" }];
+const DEFAULT_SLOTS = [
+  { id: "w1", group: "worship", label: "3/4", bpb: 3 },
+  { id: "w2", group: "worship", label: "4/4", bpb: 4 },
+  { id: "w3", group: "worship", label: "Finger snap", bpb: 4 },
+  { id: "p1", group: "praise", label: "Woro", bpb: 4 },
+  { id: "p2", group: "praise", label: "Highlife", bpb: 4 },
+  { id: "p3", group: "praise", label: "Praise", bpb: 4 }
+];
+const LONG_FILE = 30;   // seconds; longer files go through the trimmer
+if (!Array.isArray(S.slots)) S.slots = DEFAULT_SLOTS.map((s) => ({ ...s, loopId: null }));
+
+const slotById = (id) => S.slots.find((s) => s.id === id);
+const loopById = (id) => lib.find((l) => l.id === id);
+const loopOf = (slot) => (slot && slot.loopId ? loopById(slot.loopId) : null);
+const slotOfLoop = (loop) => (loop ? S.slots.find((s) => s.loopId === loop.id) : null);
+const orderedSlots = () => GROUPS.flatMap((g) => S.slots.filter((s) => s.group === g.id));
+const displayName = (n) => n.replace(/\.[^.]+$/, "");
+const bpbFromLabel = (label) => (/\b3\s*\/\s*4\b|\b6\s*\/\s*8\b|waltz/i.test(label) ? 3 : 4);
+
+function loopFromBuffer(rec, buf) {
+  let L, R;
+  if (rec.exact) { L = buf.getChannelData(0).slice(); R = buf.numberOfChannels > 1 ? buf.getChannelData(1).slice() : null; }
+  else { const t = trimLossyPadding(buf, rec.name); L = t.L; R = t.R; }
+  const loop = { id: rec.id, name: displayName(rec.name), L, R: R || L, len: L.length, dur: L.length / buf.sampleRate, sr: buf.sampleRate, bpb: rec.bpb || 4 };
+  if (rec.bpm) { loop.bpm = rec.bpm; loop.how = rec.how || "set by you"; }
+  else { const g = guessBpm(rec.name, L, buf.sampleRate, loop.dur, loop.bpb); loop.bpm = g.bpm; loop.how = g.how; rec.bpm = g.bpm; rec.how = g.how; }
+  return loopMeta(loop);
+}
+async function loopFromData(rec) { return loopFromBuffer(rec, await decode(rec.data)); }
+
+// 16-bit WAV of just the chosen part, so a long file is stored as one small loop
+function encodeWav(buf, startSec, endSec) {
+  const sr = buf.sampleRate, ch = Math.min(2, buf.numberOfChannels);
+  const a = Math.max(0, Math.round(startSec * sr)), b = Math.min(buf.length, Math.round(endSec * sr)), n = b - a;
+  const out = new ArrayBuffer(44 + n * ch * 2), v = new DataView(out);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * ch * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, ch, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * ch * 2, true); v.setUint16(32, ch * 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * ch * 2, true);
+  const chans = []; for (let c = 0; c < ch; c++) chans.push(buf.getChannelData(c));
+  const fadeIn = Math.round(sr * 0.0005), fadeOut = Math.round(sr * 0.002);
+  let p = 44;
+  for (let i = 0; i < n; i++) {
+    const g = Math.min(1, i < fadeIn ? i / fadeIn : 1, n - 1 - i < fadeOut ? (n - 1 - i) / fadeOut : 1);
+    for (let c = 0; c < ch; c++) {
+      const x = Math.max(-1, Math.min(1, chans[c][a + i] * g));
+      v.setInt16(p, x < 0 ? x * 32768 : x * 32767, true); p += 2;
+    }
   }
-  const buf = await oc.startRendering();
-  return loopMeta({ id: "demo", name: "Example groove 96 BPM", L: buf.getChannelData(0), R: buf.getChannelData(1), len, dur, sr, bpm, how: "set", builtin: true });
+  return out;
 }
 
-function select(id, quiet) {
-  S.selected = id; saveSettings();
-  const loop = lib.find((l) => l.id === id);
+function bufferFromLoop(loop) {
+  const buf = ctx.createBuffer(2, loop.len, loop.sr);
+  buf.copyToChannel(loop.L, 0); buf.copyToChannel(loop.R, 1);
+  return buf;
+}
+
+function newSlot(group, label) {
+  const slot = { id: uid(), group, label: label || "New loop", bpb: bpbFromLabel(label || ""), loopId: null };
+  S.slots.push(slot); saveSettings();
+  return slot;
+}
+
+const AUDIO_EXT = /\.(mp3|wav|wave|m4a|aac|aif|aiff|aifc|flac|ogg|oga|opus|caf)$/i;
+
+// Put files into slots: the first into slotId (if given), the rest into empty slots in order
+async function addFiles(files, slotId) {
+  audio();
+  if (ctx.state !== "running") ctx.resume().catch(() => {});   // never wait on this: decoding works with sound still off
+  const all = [...files].filter((f) => f && !f.name.startsWith("."));
+  const list = all.filter((f) => /^audio\//.test(f.type) || AUDIO_EXT.test(f.name));
+  if (!list.length) {
+    toast(all.length ? "Those aren't audio files. Use MP3, WAV, M4A or AIFF." : "Nothing came through. Drag the files from Finder, or use Add loop files.");
+    return;
+  }
+  let added = 0; const failed = [];
+  let lastGroup = (slotById(slotId) || slotById(S.selected) || { group: "worship" }).group;
+  for (let i = 0; i < list.length; i++) {
+    const f = list[i];
+    let slot = i === 0 && slotId ? slotById(slotId) : orderedSlots().find((s) => !s.loopId);
+    if (!slot) slot = newSlot(lastGroup, displayName(f.name));
+    lastGroup = slot.group;
+    toast(`Opening ${f.name}...`, 60000);
+    try {
+      const r = await loadIntoSlot(f, slot);
+      if (r === "added") added++;
+    } catch (e) { failed.push(f.name); }
+  }
+  renderSlots(); renderTempo();
+  const parts = [];
+  if (added) parts.push(`Added ${added} loop${added > 1 ? "s" : ""}.`);
+  if (failed.length) parts.push(`Couldn't open ${failed.join(", ")}. Save ${failed.length > 1 ? "them" : "it"} as WAV or MP3 and try again.`);
+  if (parts.length) toast(parts.join(" "), failed.length ? 9000 : 4000); else $("#toast").hidden = true;
+}
+
+async function loadIntoSlot(file, slot) {
+  const data = await file.arrayBuffer();
+  const buf = await decode(data);
+  let rec;
+  if (buf.duration > LONG_FILE) {
+    $("#toast").hidden = true;
+    const pick = await openTrimmer({ name: file.name, buffer: buf, bpb: slot.bpb || 4, label: slot.label });
+    if (!pick) return "cancelled";
+    rec = { id: uid(), name: file.name, data: encodeWav(buf, pick.start, pick.end), added: Date.now(), bpm: pick.bpm, how: "set when trimmed", exact: true, bpb: pick.bpb };
+  } else {
+    rec = { id: uid(), name: file.name, data, added: Date.now(), bpb: slot.bpb || 4 };
+  }
+  const loop = rec.exact ? await loopFromData(rec) : loopFromBuffer(rec, buf);
+  placeLoop(slot, loop, rec);
+  return "added";
+}
+
+function placeLoop(slot, loop, rec) {
+  const old = loopOf(slot);
+  lib.push(loop);
+  slot.loopId = loop.id;
+  DB.put(rec);
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  if (old) {
+    if (loops && loops.playing && (loops.loop === old || (loops.pending && loops.pending.loop === old))) loops.queue(loop, S.mode === "now" ? "now" : "loop");
+    lib = lib.filter((l) => l !== old);
+    if (old.id !== rec.id) DB.del(old.id);
+  }
+  if (!loopOf(slotById(S.selected))) S.selected = slot.id;
+  if (S.selected === slot.id && loops && !loops.playing) { loops.loop = loop; loops.applyRatio(); }
+  saveSettings();
+}
+
+async function trimSlot(slot) {
+  const loop = loopOf(slot);
   if (!loop) return;
+  audio();
+  const pick = await openTrimmer({ name: loop.name, buffer: bufferFromLoop(loop), bpb: loop.bpb, bpm: loop.bpm, label: slot.label });
+  if (!pick) return;
+  const rec = { id: uid(), name: loop.name + ".wav", data: encodeWav(bufferFromLoop(loop), pick.start, pick.end), added: Date.now(), bpm: pick.bpm, how: "set when trimmed", exact: true, bpb: pick.bpb };
+  const fresh = await loopFromData(rec);
+  fresh.name = loop.name;
+  placeLoop(slot, fresh, rec);
+  renderSlots(); renderTempo();
+  toast("Loop trimmed.");
+}
+
+function select(slotId, quiet) {
+  const slot = slotById(slotId);
+  if (!slot) return;
+  const loop = loopOf(slot);
+  if (!loop) { pickFileFor(slot.id); return; }
+  S.selected = slot.id; saveSettings();
   if (loops && loops.playing) {
     const r = loops.queue(loop, S.mode);
-    if (r === "queued" && !quiet) toast(S.mode === "bar" ? "Switching at the next bar" : "Switching at the end of this loop");
+    if (r === "queued" && !quiet) toast(S.mode === "bar" ? `${slot.label}: starts at the next bar` : `${slot.label}: starts at the end of this loop`);
   } else if (loops) { loops.loop = loop; loops.applyRatio(); }
-  renderLoops(); renderTempo();
+  renderSlots(); renderTempo();
 }
 
-function removeLoop(id) {
-  const loop = lib.find((l) => l.id === id);
-  if (!loop) return;
-  if (loops && loops.playing && (loops.loop === loop || (loops.heardState() || {}).loop === loop)) togglePlay(false);
+function clearSlot(slotId) {
+  const slot = slotById(slotId), loop = loopOf(slot);
+  if (!slot) return;
+  if (!loop) {   // an empty slot: remove the slot itself
+    S.slots = S.slots.filter((s) => s !== slot);
+    if (S.selected === slot.id) S.selected = (orderedSlots().find((s) => s.loopId) || {}).id || null;
+    saveSettings(); renderSlots(); return;
+  }
+  const heard = loops && loops.heardState();
+  if (loops && loops.playing && (loops.loop === loop || (heard && heard.loop === loop))) togglePlay(false);
+  if (loops && loops.pending && loops.pending.loop === loop) loops.pending = null;
   lib = lib.filter((l) => l !== loop);
-  if (loop.builtin) S.hideDemo = true; else DB.del(id);
-  if (S.selected === id) S.selected = lib[0] ? lib[0].id : null;
-  if (loops) loops.loop = lib.find((l) => l.id === S.selected) || null;
-  saveSettings(); renderLoops(); renderTempo();
+  DB.del(loop.id);
+  slot.loopId = null;
+  if (S.selected === slot.id) {
+    const next = orderedSlots().find((s) => s.loopId);
+    if (next) S.selected = next.id;
+  }
+  if (loops && !loops.playing) loops.loop = loopOf(slotById(S.selected));
+  saveSettings(); renderSlots(); renderTempo();
 }
 
-function setLoopBpm(id, v) {
-  const loop = lib.find((l) => l.id === id);
-  if (!loop || !(v >= 30 && v <= 300)) { renderLoops(); return; }
+function setLoopBpm(loop, v) {
+  if (!loop || !(v >= 30 && v <= 300)) { renderSlots(); return; }
   loop.bpm = v; loop.how = "set by you"; loopMeta(loop);
-  if (!loop.builtin && DB.db) {
+  if (DB.db) {
     DB.tx("readwrite", (s) => {
-      const r = s.get(id);
+      const r = s.get(loop.id);
       r.onsuccess = () => { if (r.result) { r.result.bpm = v; r.result.how = "set by you"; s.put(r.result); } };
       return r;
     });
   }
   if (loops) loops.applyRatio();
-  renderLoops(); renderTempo();
+  renderSlots(); renderTempo();
 }
 
 const fmt = (n) => (Math.abs(n - Math.round(n)) < 0.05 ? String(Math.round(n)) : n.toFixed(1));
 
-function renderLoops() {
-  const ul = $("#loop-list");
-  ul.textContent = "";
-  $("#loop-empty").hidden = lib.length > 0;
+let pickSlot = null;
+function pickFileFor(slotId) { pickSlot = slotId; $("#slot-file-in").click(); }
+
+function renderSlots() {
+  const wrap = $("#slots");
+  wrap.textContent = "";
   const heard = loops && loops.heardState();
-  for (const loop of lib) {
-    const li = document.createElement("li");
-    li.className = "loop";
-    if (loop.id === S.selected) li.setAttribute("aria-current", "true");
-    if (loops && loops.pending && loops.pending.loop === loop) li.classList.add("queued");
-    if (heard && heard.loop === loop) li.classList.add("heard");
-    const pick = document.createElement("button");
-    pick.className = "loop-pick";
-    pick.innerHTML = '<span class="dot"></span><span class="loop-text"><span class="loop-name"></span><span class="loop-sub"></span></span>';
-    pick.querySelector(".loop-name").textContent = loop.name;
+  const order = orderedSlots();
+  for (const g of GROUPS) {
+    const sec = document.createElement("section");
+    sec.className = "group";
+    sec.setAttribute("aria-label", g.name + " loops");
+    const h = document.createElement("h3");
+    h.textContent = g.name;
+    sec.append(h);
+    const ul = document.createElement("ul");
+    ul.className = "slot-list";
+    for (const slot of S.slots.filter((s) => s.group === g.id)) ul.append(slotRow(slot, order.indexOf(slot) + 1, heard));
+    sec.append(ul);
+    sec.append(addSlotControl(g));
+    wrap.append(sec);
+  }
+  $("#play").disabled = !lib.length;
+}
+
+function slotRow(slot, num, heard) {
+  const loop = loopOf(slot);
+  const li = document.createElement("li");
+  li.className = "slot" + (loop ? "" : " empty");
+  li.dataset.slot = slot.id;
+  if (loop && slot.id === S.selected) li.setAttribute("aria-current", "true");
+  if (loop && loops && loops.pending && loops.pending.loop === loop) li.classList.add("queued");
+  if (loop && heard && heard.loop === loop) li.classList.add("heard");
+
+  const main = document.createElement("button");
+  main.className = "slot-main";
+  main.innerHTML = '<span class="slot-num"></span><span class="slot-text"><span class="slot-label"></span><span class="slot-file"></span></span>';
+  main.querySelector(".slot-num").textContent = num <= 9 ? num : "";
+  main.querySelector(".slot-label").textContent = slot.label;
+  if (loop) {
     const queued = loops && loops.pending && loops.pending.loop === loop ? " · up next" : "";
-    pick.querySelector(".loop-sub").textContent = `${loop.dur.toFixed(1)} s · ${loop.bars} bar${loop.bars > 1 ? "s" : ""} · tempo ${loop.how}${queued}`;
-    pick.addEventListener("click", () => select(loop.id));
+    main.querySelector(".slot-file").textContent = `${loop.name} · ${loop.dur.toFixed(1)} s · ${loop.bars} bar${loop.bars > 1 ? "s" : ""} of ${loop.bpb}/4 · tempo ${loop.how}${queued}`;
+    main.setAttribute("aria-label", `Play ${slot.label}: ${loop.name}`);
+  } else {
+    main.querySelector(".slot-file").textContent = "Empty. Drop a file here, or tap to choose one.";
+    main.setAttribute("aria-label", `Choose a file for ${slot.label}`);
+  }
+  main.addEventListener("click", () => select(slot.id));
+
+  const tools = document.createElement("div");
+  tools.className = "slot-tools";
+  if (loop) {
     const field = document.createElement("label");
     field.className = "bpm-field";
     const inp = document.createElement("input");
     inp.type = "number"; inp.step = "0.1"; inp.min = "30"; inp.max = "300"; inp.value = fmt(loop.bpm);
-    inp.id = "bpm-" + loop.id;
-    inp.setAttribute("aria-label", `Original tempo of ${loop.name} in BPM`);
-    inp.addEventListener("change", () => setLoopBpm(loop.id, parseFloat(inp.value)));
+    inp.id = "bpm-" + slot.id;
+    inp.setAttribute("aria-label", `Own tempo of ${slot.label} in BPM`);
+    inp.addEventListener("change", () => setLoopBpm(loop, parseFloat(inp.value)));
     field.append(inp, document.createTextNode("BPM"));
-    const rm = document.createElement("button");
-    rm.className = "loop-remove"; rm.textContent = "×";
-    rm.setAttribute("aria-label", `Remove ${loop.name}`);
-    rm.addEventListener("click", () => removeLoop(loop.id));
-    li.append(pick, field, rm);
-    ul.append(li);
+    tools.append(field);
+    tools.append(toolBtn("Trim", `Trim ${slot.label}`, () => trimSlot(slot)));
+    tools.append(toolBtn("Replace", `Replace the file in ${slot.label}`, () => pickFileFor(slot.id)));
   }
-  $("#play").disabled = !lib.length;
+  tools.append(toolBtn("Rename", `Rename ${slot.label}`, () => renameSlot(li, slot)));
+  const rm = toolBtn("×", loop ? `Clear ${slot.label}` : `Remove the ${slot.label} slot`, () => clearSlot(slot.id));
+  rm.classList.add("x");
+  tools.append(rm);
+  li.append(main, tools);
+
+  // Drop a file straight onto this slot
+  li.addEventListener("dragover", (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); li.classList.add("over"); } });
+  li.addEventListener("dragleave", () => li.classList.remove("over"));
+  li.addEventListener("drop", (e) => {
+    e.preventDefault(); e.stopPropagation(); li.classList.remove("over");
+    hideOverlay();
+    const got = dropEntries(e.dataTransfer);
+    filesFromEntries(got).then((files) => addFiles(files, slot.id));
+  });
+  return li;
+}
+
+function toolBtn(text, label, fn) {
+  const b = document.createElement("button");
+  b.className = "tool"; b.textContent = text;
+  b.setAttribute("aria-label", label);
+  b.addEventListener("click", fn);
+  return b;
+}
+
+function renameSlot(li, slot) {
+  const main = li.querySelector(".slot-main");
+  const form = document.createElement("form");
+  form.className = "rename";
+  const inp = document.createElement("input");
+  inp.value = slot.label; inp.maxLength = 32; inp.id = "rename-" + slot.id;
+  inp.setAttribute("aria-label", "Slot name");
+  const ok = document.createElement("button"); ok.className = "tool"; ok.textContent = "Save"; ok.type = "submit";
+  form.append(inp, ok);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const v = inp.value.trim();
+    if (v) { slot.label = v; if (!loopOf(slot)) slot.bpb = bpbFromLabel(v); saveSettings(); }
+    renderSlots();
+  });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Escape") renderSlots(); });
+  main.replaceWith(form);
+  inp.focus(); inp.select();
+}
+
+function addSlotControl(g) {
+  const box = document.createElement("div");
+  box.className = "add-slot";
+  const btn = document.createElement("button");
+  btn.className = "tool add"; btn.textContent = `+ Add a ${g.name.toLowerCase()} loop`;
+  btn.addEventListener("click", () => {
+    const form = document.createElement("form");
+    form.className = "rename";
+    const inp = document.createElement("input");
+    inp.placeholder = g.id === "praise" ? "Name, like Makossa" : "Name, like 6/8";
+    inp.maxLength = 32; inp.id = "new-" + g.id;
+    inp.setAttribute("aria-label", `Name for the new ${g.name.toLowerCase()} loop`);
+    const ok = document.createElement("button"); ok.className = "tool"; ok.textContent = "Add"; ok.type = "submit";
+    form.append(inp, ok);
+    form.addEventListener("submit", (e) => { e.preventDefault(); const v = inp.value.trim(); if (v) newSlot(g.id, v); renderSlots(); });
+    inp.addEventListener("keydown", (e) => { if (e.key === "Escape") renderSlots(); });
+    btn.replaceWith(form);
+    inp.focus();
+  });
+  box.append(btn);
+  return box;
+}
+
+/* ----- Trimmer: keep one loop's worth of a long file ----- */
+function openTrimmer({ name, buffer, bpb, bpm, label }) {
+  return new Promise((resolve) => {
+    const dlg = $("#trimmer");
+    const sr = buffer.sampleRate, dur = buffer.duration;
+    const mono = buffer.getChannelData(0);
+    const hits = onsetTimes(mono, sr);
+    const st = {
+      bpb: bpb || 4,
+      bpm: bpm || guessBpm(name, mono.subarray(0, Math.min(mono.length, sr * 30)), sr, 0, bpb || 4).bpm,
+      bars: 4,
+      start: 0
+    };
+    const len = () => st.bars * st.bpb * 60 / st.bpm;
+    const fit = () => { while (st.bars > 1 && len() > dur) st.bars /= 2; st.start = clamp(st.start, 0, Math.max(0, dur - len())); };
+    st.start = hits.find((t) => t < dur) || 0;
+    fit();
+    const snap = (t) => {
+      let best = t, bd = 0.12;
+      for (const h of hits) { const d = Math.abs(h - t); if (d < bd) { bd = d; best = h; } }
+      return best;
+    };
+
+    $("#trim-title").textContent = label ? `Trim for ${label}` : "Trim loop";
+    $("#trim-name").textContent = `${displayName(name)} is ${Math.floor(dur / 60)}:${String(Math.floor(dur % 60)).padStart(2, "0")} long. Keep one loop of it so it opens fast and takes little space.`;
+    const bpmIn = $("#trim-bpm"); bpmIn.value = fmt(st.bpm);
+    const canvas = $("#trim-wave");
+
+    let preview = null;
+    const stopPreview = () => { if (preview) { try { preview.stop(); } catch (e) { /* done */ } preview = null; } $("#trim-play").textContent = "Preview"; };
+    const startPreview = () => {
+      stopPreview();
+      audio(); ctx.resume().catch(() => {});
+      const s = ctx.createBufferSource(); s.buffer = buffer; s.loop = true;
+      s.loopStart = st.start; s.loopEnd = st.start + len();
+      const g = ctx.createGain(); g.gain.value = 0.9; s.connect(g); g.connect(master);
+      s.start(0, st.start); preview = s;
+      $("#trim-play").textContent = "Stop preview";
+    };
+
+    const draw = () => {
+      const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+      const c = canvas.getContext("2d"); c.scale(dpr, dpr);
+      const css = getComputedStyle(document.documentElement);
+      const ink = css.getPropertyValue("--ink").trim(), muted = css.getPropertyValue("--muted").trim(), line = css.getPropertyValue("--line").trim();
+      c.clearRect(0, 0, w, h);
+      const x0 = st.start / dur * w, x1 = (st.start + len()) / dur * w;
+      c.fillStyle = line; c.fillRect(x0, 0, Math.max(2, x1 - x0), h);
+      const step = mono.length / w;
+      for (let x = 0; x < w; x++) {
+        let m = 0; const a = Math.floor(x * step), b = Math.min(mono.length, Math.floor((x + 1) * step));
+        for (let i = a; i < b; i += 4) { const v = Math.abs(mono[i]); if (v > m) m = v; }
+        const bh = Math.max(1, m * (h - 8));
+        c.fillStyle = x >= x0 && x <= x1 ? ink : muted;
+        c.fillRect(x, (h - bh) / 2, 1, bh);
+      }
+      c.fillStyle = ink; c.fillRect(x0, 0, 2, h); c.fillRect(Math.min(w - 2, x1), 0, 2, h);
+      const mins = Math.floor(st.start / 60), secs = (st.start % 60).toFixed(2).padStart(5, "0");
+      $("#trim-start").textContent = `${mins}:${secs}`;
+      const kb = Math.round(len() * sr * Math.min(2, buffer.numberOfChannels) * 2 / 1024);
+      $("#trim-info").textContent = `${st.bars} bar${st.bars > 1 ? "s" : ""} of ${st.bpb}/4 = ${len().toFixed(1)} s · saves about ${kb > 1024 ? (kb / 1024).toFixed(1) + " MB" : kb + " KB"}`;
+      [...$("#trim-bars").children].forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.bars) === st.bars)));
+      [...$("#trim-bpb").children].forEach((b) => b.setAttribute("aria-pressed", String(Number(b.dataset.bpb) === st.bpb)));
+      if (preview) { preview.loopStart = st.start; preview.loopEnd = st.start + len(); }
+    };
+    const update = () => { fit(); draw(); };
+
+    const ctl = new AbortController(), on = (el, ev, fn, cap) => el.addEventListener(ev, fn, { signal: ctl.signal, capture: !!cap });
+    const close = (result) => { stopPreview(); ctl.abort(); dlg.hidden = true; resolve(result); };
+    on(bpmIn, "change", () => { const v = parseFloat(bpmIn.value); if (v >= 30 && v <= 300) st.bpm = v; bpmIn.value = fmt(st.bpm); update(); });
+    [...$("#trim-bars").children].forEach((b) => on(b, "click", () => { st.bars = Number(b.dataset.bars); update(); }));
+    [...$("#trim-bpb").children].forEach((b) => on(b, "click", () => { st.bpb = Number(b.dataset.bpb); update(); }));
+    const beat = () => 60 / st.bpm;
+    on($("#trim-back-beat"), "click", () => { st.start -= beat(); update(); });
+    on($("#trim-fwd-beat"), "click", () => { st.start += beat(); update(); });
+    on($("#trim-back"), "click", () => { st.start -= 0.01; update(); });
+    on($("#trim-fwd"), "click", () => { st.start += 0.01; update(); });
+    let dragging = false;
+    const at = (e) => { const r = canvas.getBoundingClientRect(); return clamp((e.clientX - r.left) / r.width, 0, 1) * dur; };
+    on(canvas, "pointerdown", (e) => { dragging = true; canvas.setPointerCapture(e.pointerId); st.start = at(e); update(); });
+    on(canvas, "pointermove", (e) => { if (dragging) { st.start = at(e); update(); } });
+    on(canvas, "pointerup", () => { if (dragging) { dragging = false; st.start = snap(st.start); update(); } });
+    on($("#trim-play"), "click", () => (preview ? stopPreview() : startPreview()));
+    on($("#trim-cancel"), "click", () => close(null));
+    on($("#trim-save"), "click", () => close({ start: st.start, end: st.start + len(), bpm: st.bpm, bpb: st.bpb }));
+    on(window, "resize", draw);
+    on(document, "keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); close(null); } }, true);
+
+    dlg.hidden = false;
+    draw();
+    $("#trim-save").focus();
+  });
 }
 
 /* ----- Transport and tempo ----- */
 function togglePlay(force) {
   const want = typeof force === "boolean" ? force : !(loops && loops.playing);
   if (want) {
-    const loop = lib.find((l) => l.id === S.selected) || lib[0];
-    if (!loop) return;
-    wake().then(() => { loops.setTarget(S.target); loops.play(loop); renderLoops(); renderTempo(); tick(); });
+    let slot = slotById(S.selected);
+    if (!loopOf(slot)) slot = orderedSlots().find((s) => s.loopId && loopOf(s));
+    const loop = loopOf(slot);
+    if (!loop) { toast("Add a loop first: drop a file on one of the slots."); return; }
+    S.selected = slot.id; saveSettings();
+    wake().then(() => { loops.setTarget(S.target); loops.play(loop); renderSlots(); renderTempo(); tick(); });
   } else if (loops) {
     loops.stop();
   }
   $("#play").setAttribute("aria-pressed", String(want));
   $("#play").textContent = want ? "Stop" : "Play";
-  if (!want) { renderLoops(); $("#bar-count").textContent = "Stopped"; $("#progress").style.width = "0"; [...$("#beats").children].forEach((d) => d.className = ""); }
+  if (!want) { renderSlots(); $("#bar-count").textContent = "Stopped"; $("#progress").style.width = "0"; [...$("#beats").children].forEach((d) => d.className = ""); }
 }
 
 function setTarget(v) {
@@ -334,7 +612,7 @@ function setTarget(v) {
 function renderTempo() {
   $("#bpm-num").textContent = fmt(S.target);
   $("#tempo").value = S.target;
-  const loop = (loops && loops.loop) || lib.find((l) => l.id === S.selected);
+  const loop = (loops && loops.loop) || loopOf(slotById(S.selected));
   const note = $("#tempo-note");
   if (!loop) { note.textContent = "Add a loop to set its tempo."; note.classList.remove("warn"); return; }
   const raw = S.target / loop.bpm, r = clamp(raw, 0.5, 2);
@@ -366,16 +644,20 @@ function tick() {
   if (!loops || !loops.playing) return;
   const h = loops.heardState();
   if (h) {
-    const beatLen = h.loop.len / h.loop.beats;
+    const beatLen = h.loop.len / h.loop.beats, bpb = h.loop.bpb || 4;
     const beat = Math.floor(h.pos / beatLen);
-    const inBar = beat % 4, bar = Math.floor(beat / 4) + 1;
-    [...$("#beats").children].forEach((d, i) => { d.className = i === inBar ? (i === 0 ? "lit one" : "lit") : ""; });
+    const inBar = beat % bpb, bar = Math.floor(beat / bpb) + 1;
+    const dots = $("#beats");
+    while (dots.children.length < bpb) dots.append(document.createElement("span"));
+    while (dots.children.length > bpb) dots.lastChild.remove();
+    [...dots.children].forEach((d, i) => { d.className = i === inBar ? (i === 0 ? "lit one" : "lit") : ""; });
     $("#bar-count").textContent = `Bar ${Math.min(bar, h.loop.bars)} of ${h.loop.bars}`;
     $("#progress").style.width = (h.pos / h.loop.len * 100).toFixed(1) + "%";
     if (h.loop.id !== lastHeardId) {
       lastHeardId = h.loop.id;
-      if (S.selected !== h.loop.id && !loops.pending) { S.selected = h.loop.id; saveSettings(); }
-      renderLoops(); renderTempo();
+      const hs = slotOfLoop(h.loop);
+      if (hs && S.selected !== hs.id && !loops.pending) { S.selected = hs.id; saveSettings(); }
+      renderSlots(); renderTempo();
     }
   }
   raf = requestAnimationFrame(tick);
@@ -474,7 +756,7 @@ async function init() {
   $("#tempo-up").addEventListener("click", () => setTarget(Math.round(S.target) + 1));
   $("#tap").addEventListener("click", tap);
   $("#tempo-reset").addEventListener("click", () => {
-    const loop = (loops && loops.loop) || lib.find((l) => l.id === S.selected);
+    const loop = (loops && loops.loop) || loopOf(slotById(S.selected));
     if (loop) setTarget(loop.bpm);
   });
   $("#play").addEventListener("click", () => togglePlay());
@@ -482,9 +764,11 @@ async function init() {
   inv.setAttribute("aria-pressed", String(!!S.invert));
   inv.addEventListener("click", () => { S.invert = !S.invert; saveSettings(); applyTheme(); inv.setAttribute("aria-pressed", String(S.invert)); });
   $("#stop-pads").addEventListener("click", stopPad);
-  $("#file-in").addEventListener("change", (e) => { addFiles(e.target.files); e.target.value = ""; });
+  $("#file-in").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; addFiles(f); });
+  $("#slot-file-in").addEventListener("change", (e) => { const f = [...e.target.files]; e.target.value = ""; addFiles(f, pickSlot); });
   const overlay = $("#drop-overlay");
   let dragDepth = 0;
+  hideOverlay = () => { dragDepth = 0; overlay.hidden = true; };
   const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes("Files");
   window.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; overlay.hidden = false; });
   window.addEventListener("dragover", (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; overlay.hidden = false; });
@@ -497,9 +781,13 @@ async function init() {
   });
   document.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select") return;
+    if (tag === "input" || tag === "textarea" || tag === "select" || !$("#trimmer").hidden) return;
     if (e.code === "Space") { e.preventDefault(); if (!e.repeat && lib.length) togglePlay(); }
     if (e.key === "Escape") stopPad();
+    if (/^[1-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      const slot = orderedSlots()[Number(e.key) - 1];
+      if (slot && loopOf(slot)) select(slot.id);
+    }
   });
   // Stop Space from also clicking whichever button has focus
   document.addEventListener("keyup", (e) => {
@@ -511,19 +799,28 @@ async function init() {
   audio();
   updatePill();
   renderTempo();
+  renderSlots();
   if (await DB.open()) {
     const recs = (await DB.all()) || [];
     recs.sort((a, b) => (a.added || 0) - (b.added || 0));
     for (const rec of recs) {
-      try { const loop = await loopFromData(rec); loop.name = rec.name.replace(/\.[^.]+$/, ""); lib.push(loop); } catch (e) { /* skip unreadable file */ }
+      try { lib.push(await loopFromData(rec)); } catch (e) { /* skip unreadable file */ }
     }
   }
-  // The example groove only shows until you add loops of your own
-  if (!lib.length && !S.hideDemo) { try { lib.push(await makeDemo()); } catch (e) { /* example could not be made */ } }
-  if (!lib.some((l) => l.id === S.selected)) S.selected = lib[0] ? lib[0].id : null;
-  if (loops) loops.loop = lib.find((l) => l.id === S.selected) || null;
-  if (loops) loops.applyRatio();
-  renderLoops();
+  // Slots that point at a missing loop become empty; loops from before slots existed fill empty slots
+  for (const s of S.slots) if (s.loopId && !loopById(s.loopId)) s.loopId = null;
+  for (const loop of lib) {
+    if (slotOfLoop(loop)) continue;
+    const empty = orderedSlots().find((s) => !s.loopId);
+    (empty || newSlot("praise", loop.name)).loopId = loop.id;
+  }
+  if (!slotById(S.selected)) {
+    const bySelectedLoop = S.slots.find((s) => s.loopId === S.selected);
+    S.selected = (bySelectedLoop || orderedSlots().find((s) => s.loopId) || {}).id || null;
+  }
+  saveSettings();
+  if (loops) { loops.loop = loopOf(slotById(S.selected)); loops.applyRatio(); }
+  renderSlots();
   renderTempo();
 }
 init();

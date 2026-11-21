@@ -1,7 +1,7 @@
 {
-  "name": "Pad and Loop Station",
-  "short_name": "Pad Station",
-  "description": "Worship pads in every key and gapless loops with tempo control.",
+  "name": "Loopadicious",
+  "short_name": "Loopadicious",
+  "description": "Loopadicious: worship pads in every key and gapless loops with tempo control.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

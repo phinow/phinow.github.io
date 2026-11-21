@@ -1,5 +1,5 @@
 // Keeps the app working offline. Bump VERSION when files change so phones and laptops pick up the update.
-const VERSION = "pad-loop-station-v3";
+const VERSION = "pad-loop-station-v4";
 const FILES = [
   "./",
   "index.html",
@@ -10,6 +10,8 @@ const FILES = [
   "icons/icon-192.png",
   "icons/icon-512.png",
   "icons/apple-touch-icon.png",
+  "fonts/unbounded-latin-700-normal.woff2",
+  "fonts/unbounded-latin-800-normal.woff2",
   "fonts/barlow-condensed-latin-600-normal.woff2",
   "fonts/barlow-condensed-latin-700-normal.woff2",
   "fonts/ibm-plex-sans-latin-400-normal.woff2",

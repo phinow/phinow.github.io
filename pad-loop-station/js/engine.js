@@ -267,8 +267,9 @@ class PadEngine {
 const LOOP_BUF = 4096;
 
 function loopMeta(loop) {
+  const bpb = loop.bpb || 4;   // beats per bar: 3 for 3/4, 4 for 4/4
   loop.beats = Math.max(1, Math.round(loop.dur * loop.bpm / 60));
-  loop.bars = loop.beats >= 4 ? Math.max(1, Math.round(loop.beats / 4)) : 1;
+  loop.bars = loop.beats >= bpb ? Math.max(1, Math.round(loop.beats / bpb)) : 1;
   loop.barLen = loop.len / loop.bars;
   return loop;
 }
@@ -451,12 +452,14 @@ function autocorrBpm(L, sr) {
   return bpm;
 }
 
-function guessBpm(name, L, sr, dur) {
+function guessBpm(name, L, sr, dur, bpb) {
+  bpb = bpb || 4;
   const m = name.match(/(\d{2,3}(?:\.\d+)?)\s*[-_ ]?\s*bpm/i) || name.match(/bpm\s*[-_ ]?\s*(\d{2,3}(?:\.\d+)?)/i);
   if (m) { const v = parseFloat(m[1]); if (v >= 40 && v <= 240) return { bpm: v, how: "from file name" }; }
   const ac = autocorrBpm(L, sr);
   const cands = [];
-  for (const beats of [2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]) {
+  // A loop's length is a whole number of beats; skip this when dur is not a loop length (long files in the trimmer)
+  if (dur) for (const beats of [2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64]) {
     const b = 60 * beats / dur;
     if (b >= 60 && b <= 180) cands.push({ b, beats });
   }
@@ -468,7 +471,7 @@ function guessBpm(name, L, sr, dur) {
         Math.abs(Math.log2(c.b / (ref * 2))) + 0.35,
         Math.abs(Math.log2(c.b / (ref / 2))) + 0.35);
       const range = c.b < 70 || c.b > 165 ? 0.3 : 0;
-      return d + range + (c.beats % 4 ? 0.15 : 0) + (ac ? 0 : Math.abs(Math.log2(c.b / 100)) * 0.1);
+      return d + range + (c.beats % bpb ? 0.15 : 0) + (ac ? 0 : Math.abs(Math.log2(c.b / 100)) * 0.1);
     };
     cands.sort((a, b) => score(a) - score(b));
     return { bpm: Math.round(cands[0].b * 10) / 10, how: "detected" };
@@ -477,4 +480,28 @@ function guessBpm(name, L, sr, dur) {
   return { bpm: 120, how: "guess" };
 }
 
-if (typeof module !== "undefined") module.exports = { LoopEngine, loopMeta, guessBpm, autocorrBpm, KEYS, VOICINGS, STYLES };
+// Times (seconds) of clear hits in the audio, for snapping a loop start onto a beat
+function onsetTimes(L, sr) {
+  const hop = Math.round(sr * 0.01), frames = Math.floor(L.length / hop) - 1;
+  if (frames < 3) return [0];
+  const env = new Float32Array(frames);
+  for (let f = 0; f < frames; f++) {
+    let e = 0; const s = f * hop;
+    for (let i = 0; i < hop * 2 && s + i < L.length; i++) e += L[s + i] * L[s + i];
+    env[f] = Math.log(1e-9 + e);
+  }
+  const on = new Float32Array(frames);
+  let mean = 0, sq = 0;
+  for (let f = 1; f < frames; f++) { on[f] = Math.max(0, env[f] - env[f - 1]); mean += on[f]; sq += on[f] * on[f]; }
+  mean /= frames; const sd = Math.sqrt(Math.max(0, sq / frames - mean * mean));
+  const th = mean + 1.5 * sd, out = [];
+  for (let f = 1; f < frames - 1; f++) {
+    if (on[f] > th && on[f] >= on[f - 1] && on[f] >= on[f + 1] && env[f] > -12) {
+      const t = f * 0.01;
+      if (!out.length || t - out[out.length - 1] > 0.06) out.push(t);
+    }
+  }
+  return out.length ? out : [0];
+}
+
+if (typeof module !== "undefined") module.exports = { LoopEngine, loopMeta, guessBpm, autocorrBpm, onsetTimes, KEYS, VOICINGS, STYLES };

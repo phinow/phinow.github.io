@@ -1,9 +1,11 @@
-# Pad and Loop Station
+# Loopadicious
 
-A black and white web app for church: loops on the left, worship pads on the right.
+Loop + pad + delicious. A black and white web app for church: loops on the left, worship pads on the right.
 
 - **Pads:** all 12 keys. Tap a key to start, tap another to crossfade, and press Stop pad (or Esc) to cut it off at once. Four sounds: Warm, Shimmer, Strings and Air. Three chords: Open (root and fifth, fits major and minor songs), Major and Minor. The pads are made live in the browser, so there are no pad files and no loop point.
-- **Loops:** add MP3, WAV, M4A or AIFF files, or drag in a whole folder. Drop them anywhere on the page. They loop with no gap and stay saved in the browser on that device. Set the tempo with +/-, the slider or Tap tempo; the pitch stays the same. Each loop's own BPM is read from the file name (for example `Afro 98bpm.wav`) or worked out from its length. Check it and type over it if it's wrong. While a loop plays, tap another one and it switches at the next bar, at the end of the loop, or straight away.
+- **Loop slots:** Worship has 3/4, 4/4 and Finger snap. Praise has Woro, Highlife and Praise. Drop a file on a slot (or tap the slot to choose one). Add more slots with **+ Add a worship loop** or **+ Add a praise loop**, and rename any slot. Keys 1 to 9 pick a slot, Space plays or stops.
+- **Long files:** anything over 30 seconds opens the trimmer. Pick the tempo, 3/4 or 4/4, how many bars (1, 2, 4 or 8) and where it starts, preview it, then keep just that loop. Only the trimmed part is saved, so a big WAV becomes a small loop. Use **Trim** on any slot to shorten a loop later.
+- **Tempo:** set it with +/-, the slider or Tap tempo; the pitch stays the same. While a loop plays, pick another and it switches at the next bar, at the end of the loop, or straight away. MP3, WAV, M4A and AIFF all work, and loops stay saved in the browser on that device.
 - **Invert colours:** the button at the top switches between white on black and black on white. It remembers your choice.
 - **Works offline:** after you open it once, it opens with no internet.
 
@@ -40,4 +42,4 @@ When you change any file, bump `VERSION` in `sw.js` so installed copies pick up 
 ## Credits
 
 - Tempo change without pitch change: [SoundTouch JS](https://github.com/cutterbl/SoundTouchJS), LGPL-2.1 (`js/SOUNDTOUCH-LICENSE.txt`).
-- Fonts: Barlow Condensed and IBM Plex Sans, SIL Open Font License 1.1 (`fonts/`).
+- Fonts: Unbounded, Barlow Condensed and IBM Plex Sans, SIL Open Font License 1.1 (`fonts/`).
