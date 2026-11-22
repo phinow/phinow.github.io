@@ -4,11 +4,14 @@
 // SignalsmithStretch is loaded as a separate classic script (see build.mjs) so its worklet source
 // survives minification untouched.
 const SignalsmithStretch = (...args) => window.SignalsmithStretch(...args);
+import { resampleMono } from './media.js';
 
 export class Player {
   constructor() {
     this.ctx = null;
-    this.buffer = null;
+    this.audio = null;      // mono Float32Array of the part being studied
+    this.sampleRate = 48000;
+    this.tapeBuffer = null; // AudioBuffer, only built for tape playback
     this.notes = [];
     this.semis = 0;
     this.speed = 1;
@@ -45,12 +48,12 @@ export class Player {
     this.applyMix();
     try {
       this.stretch = await Promise.race([
-        SignalsmithStretch(this.ctx),
+        SignalsmithStretch(this.ctx, { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }),
         new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 6000)),
       ]);
       this.stretch.connect(this.audioGain);
       this.mode = 'stretch';
-      if (this.buffer) await this.loadIntoStretch();
+      if (this.audio) await this.loadIntoStretch();
     } catch (e) {
       console.warn('Stretch unavailable, using tape playback', e);
       this.stretch = null;
@@ -59,33 +62,37 @@ export class Player {
     if (this.ctx.state === 'suspended') await this.ctx.resume();
   }
 
+  // The worklet gets its own copy of the audio (moved, not duplicated, by transferring it).
   async loadIntoStretch() {
-    if (!this.stretch || !this.buffer) return;
-    await this.stretch.dropBuffers();
-    const b = this.buffer;
-    const ch0 = b.getChannelData(0);
-    const ch1 = b.numberOfChannels > 1 ? b.getChannelData(1) : ch0;
-    // Stretch expects buffers at the context rate.
-    if (b.sampleRate === this.ctx.sampleRate) {
-      await this.stretch.addBuffers([ch0.slice(), ch1.slice()]);
-    } else {
-      const off = new OfflineAudioContext(2, Math.ceil(b.duration * this.ctx.sampleRate), this.ctx.sampleRate);
-      const src = off.createBufferSource();
-      src.buffer = b;
-      src.connect(off.destination);
-      src.start();
-      const r = await off.startRendering();
-      await this.stretch.addBuffers([r.getChannelData(0), r.getChannelData(1)]);
+    if (!this.stretch || !this.audio) return;
+    if (this.sampleRate !== this.ctx.sampleRate) {
+      this.audio = await resampleMono(this.audio, this.sampleRate, this.ctx.sampleRate);
+      this.sampleRate = this.ctx.sampleRate;
+      this.tapeBuffer = null;
     }
+    await this.stretch.dropBuffers();
+    const copy = this.audio.slice();
+    await this.stretch.addBuffers([copy], [copy.buffer]);
   }
 
-  async setAudio(buffer, notes) {
+  // audio: mono Float32Array at sampleRate (the AudioContext's rate).
+  async setAudio(audio, sampleRate, notes) {
     this.stop();
-    this.buffer = buffer;
+    this.audio = audio;
+    this.sampleRate = sampleRate;
+    this.tapeBuffer = null;
     this.notes = notes || [];
     this.pausedPos = 0;
     this.loop = null;
     if (this.stretch) await this.loadIntoStretch();
+  }
+
+  getTapeBuffer() {
+    if (!this.tapeBuffer && this.audio) {
+      this.tapeBuffer = new AudioBuffer({ length: this.audio.length, numberOfChannels: 1, sampleRate: this.sampleRate });
+      this.tapeBuffer.copyToChannel(this.audio, 0);
+    }
+    return this.tapeBuffer;
   }
 
   setNotes(notes) {
@@ -94,7 +101,7 @@ export class Player {
   }
 
   get duration() {
-    return this.buffer ? this.buffer.duration : 0;
+    return this.audio ? this.audio.length / this.sampleRate : 0;
   }
 
   // How fast the input moves per second of real time.
@@ -122,7 +129,7 @@ export class Player {
   }
 
   async play(from) {
-    if (!this.buffer) return;
+    if (!this.audio) return;
     await this.ensureContext();
     const start = from ?? this.pausedPos;
     this.startAt(start >= this.duration - 0.05 ? 0 : start);
@@ -141,7 +148,7 @@ export class Player {
       });
     } else {
       const src = this.ctx.createBufferSource();
-      src.buffer = this.buffer;
+      src.buffer = this.getTapeBuffer();
       src.playbackRate.value = this.rate;
       src.connect(this.audioGain);
       src.start(now, pos);

@@ -1,4 +1,5 @@
-import { loadModel, transcribe, backendName } from './engine.js';
+import { loadModel, transcribe, backendName, MODEL_RATE } from './engine.js';
+import { openMedia, resampleMono } from './media.js';
 import { Player } from './player.js';
 import {
   KEY_CHOICES, detectKey, detectChords, chordName, noteNamer, midiName, defaultKeyId, keyLabel,
@@ -16,7 +17,11 @@ const S = {
   sourceName: 'Example: Eb gospel progression',
   fileBase: 'example',
   isDemo: true,
-  buffer: null,       // full decoded file
+  mono: null,         // whole file, mono, at sr
+  sr: 44100,
+  fromManual: false,  // the viewer picked "Played in" themselves
+  running: false,
+  stopAsked: false,
   notes: [],          // transcribed notes, original pitch, section-relative times
   chords: [],         // chord segments, original pitch
   key: null,
@@ -110,8 +115,10 @@ function recompute() {
 function analyze(notes, duration) {
   S.notes = notes;
   S.key = detectKey(notes);
-  S.fromId = defaultKeyId(S.key.pc, S.key.mode);
-  S.fromMode = S.key.mode;
+  if (!S.fromManual) {
+    S.fromId = defaultKeyId(S.key.pc, S.key.mode);
+    S.fromMode = S.key.mode;
+  }
   S.chords = detectChords(notes, duration);
   S.playChords = S.chords.filter(c => c.root !== null);
   recompute();
@@ -435,7 +442,7 @@ function frame() {
 /* ---------- Transport ---------- */
 
 async function togglePlay() {
-  if (!player.buffer) return;
+  if (!player.audio) return;
   if (player.playing) player.pause();
   else {
     await player.play();
@@ -511,7 +518,7 @@ function bindScrub() {
   const roll = $('roll');
   let drag = null;
   roll.addEventListener('pointerdown', e => {
-    if (!player.buffer) return;
+    if (!player.audio) return;
     drag = { y: e.clientY, pos: player.position, wasPlaying: player.playing };
     if (player.playing) player.pause();
     roll.setPointerCapture(e.pointerId);
@@ -547,12 +554,15 @@ function hideProgress() {
 
 function setBusy(b) {
   S.busy = b;
-  for (const id of ['transcribeBtn', 'fileLabel', 'secStart', 'secEnd', 'sens']) {
+  for (const id of ['fileLabel', 'secStart', 'secEnd', 'sens', 'recordBtn']) {
     const el = $(id);
     if (el.tagName === 'LABEL') el.classList.toggle('disabled', b);
     else el.disabled = b;
   }
   $('fileInput').disabled = b;
+  $('transcribeBtn').disabled = b && !S.running;
+  $('transcribeBtn').textContent = S.running ? 'Stop' : 'Transcribe';
+  $('transcribeBtn').classList.toggle('stop', S.running);
 }
 
 function showError(msg) {
@@ -560,95 +570,126 @@ function showError(msg) {
   $('sourceError').hidden = !msg;
 }
 
-async function loadArrayBuffer(arrayBuffer, name) {
+const MAX_SECTION = 20 * 60;
+
+async function loadMedia(file, name) {
+  if (S.busy) return;
   showError('');
   setBusy(true);
-  setProgress(0.05, 'Reading ' + name + '…');
+  setProgress(0.02, 'Opening ' + name + '…');
   try {
     await player.ensureContext();
     showModeNote();
-    const buf = await player.ctx.decodeAudioData(arrayBuffer);
     player.pause();
-    S.buffer = buf;
+    const { mono, sampleRate } = await openMedia(file, player.ctx, p => setProgress(p, 'Reading the sound from ' + name + '… ' + Math.round(p * 100) + '%'));
+    S.mono = mono;
+    S.sr = sampleRate;
     S.isDemo = false;
+    S.fromManual = false;
     S.sourceName = name;
     S.fileBase = name.replace(/\.[^.]+$/, '').replace(/[^\w\- ]+/g, '').trim().slice(0, 60) || 'tutorial';
+    const dur = mono.length / sampleRate;
     $('sourceName').textContent = name;
-    $('sourceNote').textContent = 'Length ' + fmt(buf.duration) + '. Pick the part where the song is played, then press Transcribe.';
     $('secStart').value = '0:00';
-    $('secEnd').value = fmt(Math.min(buf.duration, 600));
+    $('secEnd').value = fmt(Math.min(dur, MAX_SECTION));
+    $('sourceNote').textContent = 'Length ' + fmt(dur) + '.' + (dur > MAX_SECTION ? ' Up to 20 minutes can be done at once.' : '');
     hideProgress();
     setBusy(false);
-    if (buf.duration <= 180) await runTranscribe();
+    await runTranscribe();
   } catch (e) {
     console.error(e);
     hideProgress();
     setBusy(false);
-    showError('This file could not be read. Try an MP3, M4A, WAV or MP4 file.');
+    showError(e && e.message && !/decode|Unable|EncodingError/i.test(e.message) ? e.message : 'This file could not be read. Try an MP4, M4A, MP3 or WAV file.');
   }
 }
 
-function sliceBuffer(buf, a, b) {
-  const sr = buf.sampleRate;
-  const s0 = Math.floor(a * sr), s1 = Math.min(buf.length, Math.floor(b * sr));
-  const out = new AudioBuffer({ length: Math.max(1, s1 - s0), numberOfChannels: buf.numberOfChannels, sampleRate: sr });
-  for (let c = 0; c < buf.numberOfChannels; c++) out.copyToChannel(buf.getChannelData(c).subarray(s0, s1), c);
-  return out;
-}
-
-async function toMono22k(buf) {
-  const off = new OfflineAudioContext(1, Math.ceil(buf.duration * 22050), 22050);
-  const src = off.createBufferSource();
-  src.buffer = buf;
-  src.connect(off.destination);
-  src.start();
-  const r = await off.startRendering();
-  return r.getChannelData(0);
-}
+const CHUNK = 30;   // seconds of audio per model pass
+const CONTEXT = 1;  // extra second either side so notes at the edges are not cut
 
 async function runTranscribe() {
-  if (S.busy || !S.buffer) return;
+  if (S.running) { S.stopAsked = true; $('transcribeBtn').textContent = 'Stopping…'; return; }
+  if (S.busy || !S.mono) return;
   showError('');
+  const total = S.mono.length / S.sr;
   const a = parseTime($('secStart').value);
   let b = parseTime($('secEnd').value);
   if (isNaN(a) || isNaN(b)) { showError('Write start and end like 1:05.'); return; }
-  b = Math.min(b, S.buffer.duration);
+  b = Math.min(b, total);
   if (b - a < 2) { showError('The end needs to be at least 2 seconds after the start.'); return; }
-  if (b - a > 600) { showError('Pick a part of 10 minutes or less. Shorter parts finish faster.'); return; }
+  if (b - a > MAX_SECTION + 0.5) { showError('Pick a part of 20 minutes or less.'); return; }
+
+  S.running = true;
+  S.stopAsked = false;
   setBusy(true);
   player.pause();
+  clearLoop();
+  const sr = S.sr;
+  const section = S.mono.subarray(Math.floor(a * sr), Math.floor(b * sr));
+  const dur = section.length / sr;
+  let notes = [];
   try {
-    setProgress(0.02, 'Loading the note model…');
+    setProgress(0.01, 'Loading the note model…');
     const model = await loadModel(MODEL_JSON, MODEL_B64);
-    setProgress(0.04, 'Preparing audio…');
-    const section = sliceBuffer(S.buffer, a, b);
-    const mono = await toMono22k(section);
+    await player.setAudio(section, sr, notes);
+    S.notes = notes;
+    S.chords = [];
+    S.playChords = [];
+    renderChart();
+    draw(true);
     const t0 = performance.now();
-    const raw = await transcribe(model, mono, $('sens').value, p => {
-      const el = (performance.now() - t0) / 1000;
-      const eta = p > 0.05 ? Math.max(0, el / p - el) : null;
-      setProgress(0.05 + p * 0.93, 'Writing out the notes… ' + Math.round(p * 100) + '%' + (eta !== null ? ' · about ' + Math.ceil(eta) + 's left' : ''));
-    });
-    const notes = cleanNotes(raw);
-    if (!notes.length) {
-      hideProgress();
-      setBusy(false);
-      showError('No piano notes were found in this part. Try High sensitivity, or pick a part where the piano plays.');
-      return;
+    for (let c0 = 0; c0 < dur - 0.05; c0 += CHUNK) {
+      if (S.stopAsked) break;
+      const c1 = Math.min(dur, c0 + CHUNK);
+      const s0 = Math.max(0, c0 - CONTEXT);
+      const s1 = Math.min(dur, c1 + CONTEXT);
+      const piece = await resampleMono(section.subarray(Math.floor(s0 * sr), Math.floor(s1 * sr)), sr, MODEL_RATE);
+      const raw = await transcribe(model, piece, $('sens').value, p => {
+        const done = (c0 + p * (c1 - c0)) / dur;
+        const el = (performance.now() - t0) / 1000;
+        const eta = done > 0.02 ? Math.max(0, el / done - el) : null;
+        setProgress(0.02 + done * 0.98, 'Writing out the notes: ' + fmt(a + c0 + p * (c1 - c0)) + ' of ' + fmt(b) + (eta !== null ? ' · about ' + fmtEta(eta) + ' left' : ''));
+      }, () => S.stopAsked);
+      if (raw === null) break;
+      const last = c1 >= dur - 0.05;
+      const fresh = cleanNotes(raw)
+        .map(n => ({ t: n.t + s0, d: n.d, p: n.p, a: n.a }))
+        .filter(n => n.t >= c0 && (n.t < c1 || last));
+      for (const n of fresh) notes.push(n);
+      notes.sort((x, y) => x.t - y.t || x.p - y.p);
+      player.setNotes(notes);
+      if (notes.length) {
+        analyze(notes, c1);
+        $('sourceNote').textContent = 'Done up to ' + fmt(a + c1) + ' of ' + fmt(b) + '. You can play what is ready while the rest is written out.';
+      }
+      // Let the page breathe between passes.
+      await new Promise(r => setTimeout(r, 0));
     }
-    await player.setAudio(section, notes);
-    clearLoop();
-    analyze(notes, section.duration);
-    $('sourceNote').textContent = 'Transcribed ' + fmt(a) + ' to ' + fmt(b) + ': ' + notes.length + ' notes, ' + S.playChords.length + ' chord changes.';
-    $('engineInfo').textContent = 'Model ran on ' + (backendName() === 'webgl' ? 'the graphics chip' : 'the processor') + '.';
     hideProgress();
+    if (!notes.length) {
+      showError('No piano notes were found in this part. Try High sensitivity, or pick a part where the piano plays.');
+    } else {
+      analyze(notes, dur);
+      const stopped = S.stopAsked;
+      $('sourceNote').textContent = (stopped ? 'Stopped. ' : '') + 'Transcribed ' + fmt(a) + ' to ' + fmt(stopped ? a + (notes[notes.length - 1].t + notes[notes.length - 1].d) : b) + ': ' + notes.length + ' notes, ' + S.playChords.length + ' chord changes.';
+      const gpu = backendName() === 'webgl';
+      $('engineInfo').textContent = 'Model ran on ' + (gpu ? 'the graphics chip' : 'the processor') + '.';
+      if (!gpu) showError('This browser is not letting KeyShift use the graphics chip, so long files are slow. In Chrome: Settings, System, turn on graphics acceleration.');
+    }
   } catch (e) {
     console.error(e);
     hideProgress();
-    showError('Transcription stopped: ' + (e && e.message ? e.message : 'unknown error') + '. Try a shorter part.');
+    showError('Transcription stopped: ' + (e && e.message ? e.message : 'unknown error') + '. What was done so far is kept.');
   }
+  S.running = false;
+  S.stopAsked = false;
   setBusy(false);
   draw(true);
+}
+
+function fmtEta(sec) {
+  if (sec < 60) return Math.ceil(sec / 5) * 5 + ' s';
+  return Math.ceil(sec / 60) + ' min';
 }
 
 /* ---------- Tab recording (works on a normal website in desktop Chrome or Edge) ---------- */
@@ -691,7 +732,7 @@ function setupRecording() {
       btn.textContent = 'Record a tab';
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
       if (blob.size < 2000) { showError('The recording was empty.'); return; }
-      await loadArrayBuffer(await blob.arrayBuffer(), 'Tab recording ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
+      await loadMedia(blob, 'Tab recording ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }));
     };
     tracks[0].addEventListener('ended', () => { if (recorder.state !== 'inactive') recorder.stop(); });
     stream.getVideoTracks().forEach(t => t.addEventListener('ended', () => { if (recorder.state !== 'inactive') recorder.stop(); }));
@@ -738,12 +779,13 @@ async function save(kind) {
 function loadDemo() {
   const sr = 44100;
   const data = renderDemo(sr);
-  const buf = new AudioBuffer({ length: data.length, numberOfChannels: 1, sampleRate: sr });
-  buf.copyToChannel(data, 0);
-  S.buffer = buf;
+  S.mono = data;
+  S.sr = sr;
   const notes = cleanNotes(DEMO_NOTES.map(([t, d, p, a]) => ({ t, d, p, a })));
-  player.buffer = buf;
+  player.audio = data;
+  player.sampleRate = sr;
   player.notes = notes;
+  const buf = { duration: data.length / sr };
   $('secStart').value = '0:00';
   $('secEnd').value = fmt(buf.duration);
   analyze(notes, buf.duration);
@@ -766,8 +808,7 @@ function init() {
     const f = e.target.files[0];
     e.target.value = '';
     if (!f) return;
-    if (f.size > 900 * 1024 * 1024) { showError('This file is very large. Trim it or record just the part you need.'); return; }
-    await loadArrayBuffer(await f.arrayBuffer(), f.name);
+    await loadMedia(f, f.name);
   });
   const drop = $('source');
   drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('drop'); });
@@ -776,7 +817,7 @@ function init() {
     e.preventDefault();
     drop.classList.remove('drop');
     const f = e.dataTransfer.files[0];
-    if (f && !S.busy) await loadArrayBuffer(await f.arrayBuffer(), f.name);
+    if (f && !S.busy) await loadMedia(f, f.name);
   });
   $('transcribeBtn').addEventListener('click', async () => {
     await player.ensureContext();
@@ -785,8 +826,8 @@ function init() {
   });
   $('sens').addEventListener('change', () => store.set('sens', $('sens').value));
 
-  $('fromKey').addEventListener('change', () => { S.fromId = $('fromKey').value; recompute(); });
-  $('fromMode').addEventListener('change', () => { S.fromMode = $('fromMode').value; recompute(); });
+  $('fromKey').addEventListener('change', () => { S.fromId = $('fromKey').value; S.fromManual = true; recompute(); });
+  $('fromMode').addEventListener('change', () => { S.fromMode = $('fromMode').value; S.fromManual = true; recompute(); });
   $('toKey').addEventListener('change', () => { S.toId = $('toKey').value; store.set('toKey', S.toId); recompute(); });
   for (const b of $('dirSeg').querySelectorAll('button')) {
     b.addEventListener('click', () => { S.dir = b.dataset.v; store.set('dir', S.dir); recompute(); });

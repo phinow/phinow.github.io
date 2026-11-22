@@ -118,6 +118,7 @@ h2 { margin: 0; font: 600 13px/1.2 var(--display); text-transform: uppercase; le
 .btn.primary:hover { background: color-mix(in srgb, var(--ink) 85%, var(--accent)); }
 .btn.wide { width: 100%; }
 .btn.rec { border-color: var(--accent); color: var(--accent); }
+.btn.primary.stop { background: transparent; color: var(--accent); border-color: var(--accent); }
 .btn:disabled, .btn.disabled { opacity: 0.45; pointer-events: none; }
 
 .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -223,7 +224,7 @@ footer p { margin: 0 0 4px; }
       <input type="file" id="fileInput" accept="audio/*,video/*,.mp3,.m4a,.wav,.mp4,.mov,.webm,.ogg,.flac" hidden>
       <button id="recordBtn" class="btn" type="button" hidden>Record a tab</button>
     </div>
-    <p id="sourceNote" class="note">Loaded: a short example in Eb, shown in Db. Open your own tutorial to replace it. On a phone, screen-record the YouTube video with sound on, then open the recording here.</p>
+    <p id="sourceNote" class="note">Loaded: a short example in Eb, shown in Db. Open your own tutorial to replace it. Long videos are fine: the notes appear half a minute at a time, and you can play what is ready. On a phone, screen-record the YouTube video with sound on, then open the recording here.</p>
     <div class="fields">
       <label class="field">Start<input type="text" id="secStart" value="0:00" inputmode="numeric" autocomplete="off"></label>
       <label class="field">End<input type="text" id="secEnd" value="0:12" inputmode="numeric" autocomplete="off"></label>
