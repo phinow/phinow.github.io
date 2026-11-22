@@ -1,3 +1,4 @@
+if (typeof module !== "undefined" && typeof stretchOnsets === "undefined") { var { stretchOnsets } = require("./stretch.js"); }
 /* ===== Audio engine: pads (synthesized) and loops (time-stretched) ===== */
 
 const KEYS = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"];
@@ -263,9 +264,6 @@ class PadEngine {
   }
 }
 
-/* ----- Loops: gapless looping through SoundTouch, so tempo changes keep the pitch ----- */
-const LOOP_BUF = 4096;
-
 function loopMeta(loop) {
   const bpb = loop.bpb || 4;   // beats per bar: 3 for 3/4, 4 for 4/4
   loop.beats = Math.max(1, Math.round(loop.dur * loop.bpm / 60));
@@ -274,150 +272,360 @@ function loopMeta(loop) {
   return loop;
 }
 
+/* ----- Loop engine -----
+   Each loop is rendered once at the chosen tempo (by stretch.js, in a background worker), then played by the
+   browser's own looping buffer player on the audio thread. Nothing on the page (drawing, loading a file,
+   a busy computer) can interrupt it, and the loop point is exact to the sample.
+   At the loop's own tempo the original recording plays untouched. */
+const LEAD = 0.06;     // seconds ahead that every change is scheduled
+const COMMIT = 0.35;   // a queued change is locked in once its moment is this close
+const XFADE = 0.01;    // a tempo change cross-fades over the 10 ms before a beat
+const CUT = 0.003;     // switching loops: the old loop fades over its last 3 ms
+
 class LoopEngine {
-  constructor(ctx, dest, ST) {
-    this.ctx = ctx;
-    this.out = ctx.createGain();
-    this.out.connect(dest);
-    this.st = new ST.SoundTouch();
-    this.st.stretch.setParameters(ctx.sampleRate, 0, 0, 8);
-    this.filter = new ST.SimpleFilter({ extract: (t, n) => this.pull(t, n) }, this.st);
-    this.samples = new Float32Array(LOOP_BUF * 2);
-    this.node = null;
-    this.loop = null;
-    this.pending = null;
-    this.pos = 0; this.srcTotal = 0; this.heard = 0; this.events = [];
+  constructor(ctx, dest, render) {
+    this.ctx = ctx; this.sr = ctx.sampleRate; this.render = render;
+    this.out = ctx.createGain(); this.out.gain.value = 0.81; this.out.connect(dest);
+    this.cache = new WeakMap();   // loop -> Map(ratio -> AudioBuffer)
+    this.jobs = new WeakMap();    // loop -> Map(ratio -> Promise)
+    this.known = [];
+    this.loop = null; this.pending = null; this.segs = [];
     this.target = 96; this.ratio = 1; this.vol = 0.9;
+    this._playing = false; this.timer = 0; this.prepTimer = 0;
+    this.onError = null;
   }
-  get playing() { return !!this.node; }
+  get playing() { return this._playing; }
   ratioFor(loop) { return clamp(this.target / loop.bpm, 0.5, 2); }
-  applyRatio() { if (this.loop) { this.ratio = this.ratioFor(this.loop); this.st.tempo = this.ratio; } }
+  applyRatio() { if (this.loop) this.ratio = this.ratioFor(this.loop); this.prepareSoon(); this.tick(); }
   setTarget(bpm) { this.target = bpm; this.applyRatio(); }
-  setVolume(v) {
-    this.vol = v;
-    if (this.playing) this.out.gain.setTargetAtTime(v * v, this.ctx.currentTime, 0.03);
+  setVolume(v) { this.vol = v; this.out.gain.setTargetAtTime(v * v, this.ctx.currentTime, 0.03); }
+  prepare(list) { this.known = list.filter(Boolean); this.prepareSoon(); }
+
+  /* Rendered buffers */
+  bufferFor(loop, ratio) { const m = this.cache.get(loop); return (m && m.get(ratio)) || null; }
+  want(loop, ratio, urgent) {
+    let m = this.cache.get(loop); if (!m) { m = new Map(); this.cache.set(loop, m); }
+    if (m.has(ratio)) return Promise.resolve(m.get(ratio));
+    let jm = this.jobs.get(loop); if (!jm) { jm = new Map(); this.jobs.set(loop, jm); }
+    if (jm.has(ratio)) return jm.get(ratio);
+    const stale = () => ratio !== this.ratioFor(loop) && !this.segs.some((s) => s.loop === loop && s.ratio === ratio);
+    const job = (ratio === 1 ? Promise.resolve({ L: loop.L, R: loop.R }) : this.render(loop.L, loop.R, this.sr, ratio, { urgent, stale }))
+      .then(({ L, R }) => {
+        const b = this.ctx.createBuffer(2, L.length, this.sr);
+        b.copyToChannel(L, 0); b.copyToChannel(R, 1);
+        m.set(ratio, b); jm.delete(ratio);
+        // keep the original and the tempos in use or most recently asked for
+        for (const r of [...m.keys()]) if (m.size > 3 && r !== 1 && r !== ratio && !this.segs.some((s) => s.loop === loop && s.ratio === r)) m.delete(r);
+        this.tick();
+        return b;
+      }, (err) => { jm.delete(ratio); if (String(err && err.message) !== "stale" && this.onError) this.onError(err); throw err; });
+    jm.set(ratio, job);
+    return job;
+  }
+  prepareSoon() {
+    clearTimeout(this.prepTimer);
+    this.prepTimer = setTimeout(() => {
+      const order = [this.loop, this.pending && this.pending.loop, ...this.known].filter(Boolean);
+      const seen = new Set();
+      for (const l of order) { if (seen.has(l)) continue; seen.add(l); this.want(l, this.ratioFor(l), l === this.loop).catch(() => {}); }
+    }, 150);
   }
 
-  reset(loop) {
-    this.loop = loop; this.pos = 0; this.pending = null;
-    this.filter.clear(); this.st.clear();
-    this.events = [{ at: this.srcTotal, loop }];
-    this.heard = this.srcTotal;
-    this.applyRatio();
-  }
-
+  /* Transport */
   play(loop) {
-    if (this.node) this.stopNow();
-    this.srcTotal = 0;
-    this.reset(loop);
-    const n = this.ctx.createScriptProcessor(LOOP_BUF, 1, 2);
-    n.onaudioprocess = (e) => this.process(e);
-    const t = this.ctx.currentTime;
-    this.out.gain.cancelScheduledValues(t);
-    this.out.gain.setValueAtTime(0, t);
-    this.out.gain.linearRampToValueAtTime(this.vol * this.vol, t + 0.02);
-    n.connect(this.out);
-    this.node = n;
+    if (this._playing) this.stopNow();
+    this.loop = loop; this.ratio = this.ratioFor(loop); this.pending = null;
+    this._playing = true;
+    if (!this.timer) this.timer = setInterval(() => this.tick(), 25);
+    this.want(loop, this.ratio, true).catch(() => {});
+    this.tick();
   }
-
-  stopNow() {
-    if (!this.node) return;
-    this.node.onaudioprocess = null;
-    try { this.node.disconnect(); } catch (e) { /* gone */ }
-    this.node = null;
-  }
-
   stop() {
-    if (!this.node) return;
-    const node = this.node, t = this.ctx.currentTime;
-    this.node = null; this.pending = null;
-    const g = holdParam(this.out.gain, t);
-    this.out.gain.linearRampToValueAtTime(0, t + 0.06);
-    void g;
-    setTimeout(() => { node.onaudioprocess = null; try { node.disconnect(); } catch (e) { /* gone */ } }, 120);
+    if (!this._playing) return;
+    this._playing = false; this.pending = null;
+    clearInterval(this.timer); this.timer = 0;
+    const t = this.ctx.currentTime, old = this.segs; this.segs = [];
+    for (const s of old) {
+      holdParam(s.g.gain, t); s.g.gain.linearRampToValueAtTime(0, t + 0.06);
+      try { s.src.stop(t + 0.07); } catch (e) { /* already stopped */ }
+    }
+    setTimeout(() => old.forEach((s) => this.drop(s)), 250);
   }
+  stopNow() {
+    this._playing = false; this.pending = null;
+    clearInterval(this.timer); this.timer = 0;
+    for (const s of this.segs) { try { s.src.stop(); } catch (e) { /* already stopped */ } this.drop(s); }
+    this.segs = [];
+  }
+  drop(s) { try { s.src.disconnect(); s.g.disconnect(); } catch (e) { /* gone */ } }
 
   // mode: "bar" | "loop" | "now"
   queue(loop, mode) {
-    if (!this.playing) { this.loop = loop; return "selected"; }
+    if (!this._playing) { this.loop = loop; this.ratio = this.ratioFor(loop); this.prepareSoon(); return "selected"; }
     if (loop === this.loop) { this.pending = null; return "same"; }
-    if (mode === "now") { this.reset(loop); return "now"; }
-    let boundary = Infinity;
-    if (mode === "bar") {
-      const cur = this.loop;
-      const next = Math.floor(Math.ceil((this.pos + 1) / cur.barLen) * cur.barLen);
-      if (next < cur.len) boundary = next;
+    this.pending = { loop, mode };
+    this.want(loop, this.ratioFor(loop), true).catch(() => {});
+    this.tick();
+    return mode === "now" ? "now" : "queued";
+  }
+
+  /* Scheduler: runs every 25 ms while playing; the audio itself never depends on it */
+  tick() {
+    if (!this._playing) return;
+    const sr = this.sr, nowF = Math.round(this.ctx.currentTime * sr), leadF = Math.round(LEAD * sr), commitF = Math.round(COMMIT * sr);
+    while (this.segs.length > 1 && this.segs[1].startF + sr < nowF) this.drop(this.segs.shift());
+    const cur = this.segs[this.segs.length - 1];
+    if (!cur) {
+      const b = this.bufferFor(this.loop, this.ratio);
+      if (b) {
+        const B = nowF + leadF, seg = this.makeSeg(this.loop, this.ratio, b, B, B);
+        seg.g.gain.setValueAtTime(0, B / sr); seg.g.gain.linearRampToValueAtTime(1, (B + Math.round(0.003 * sr)) / sr);
+      } else this.want(this.loop, this.ratio, true).catch(() => {});
+      return;
     }
-    this.pending = { loop, boundary };
-    return "queued";
-  }
-
-  switchNow(at) {
-    const p = this.pending; this.pending = null;
-    this.loop = p.loop;
-    this.events.push({ at, loop: p.loop });
-    this.applyRatio();
-  }
-
-  pull(target, n) {
-    let loop = this.loop;
-    if (!loop) { target.fill(0, 0, n * 2); this.srcTotal += n; return n; }
-    let L = loop.L, R = loop.R, len = loop.len, pos = this.pos;
-    for (let i = 0; i < n; i++) {
-      if (pos >= len) {
-        if (this.pending) { this.switchNow(this.srcTotal + i); loop = this.loop; L = loop.L; R = loop.R; len = loop.len; }
-        pos = 0;
-      } else if (this.pending && pos >= this.pending.boundary) {
-        this.switchNow(this.srcTotal + i); loop = this.loop; L = loop.L; R = loop.R; len = loop.len;
-        pos = 0;
-      }
-      target[2 * i] = L[pos]; target[2 * i + 1] = R[pos];
-      pos++;
+    if (cur.startF > nowF) return;   // a change is locked in and has not started yet
+    if (this.pending) {
+      const p = this.pending, r = this.ratioFor(p.loop), b = this.bufferFor(p.loop, r);
+      if (!b) { this.want(p.loop, r, true).catch(() => {}); return; }   // still rendering; it will catch the next boundary
+      const B = p.mode === "now" ? nowF + leadF : this.nextBoundary(cur, nowF + leadF, p.mode === "bar" ? cur.loop.bars : 1).at;
+      if (B - nowF > commitF) return;
+      this.switchTo(cur, p.loop, r, b, B);
+      this.pending = null; this.loop = p.loop; this.ratio = r;
+      return;
     }
-    this.pos = pos; this.srcTotal += n;
-    return n;
+    const r = this.ratioFor(cur.loop);
+    if (r !== cur.ratio) {
+      const b = this.bufferFor(cur.loop, r);
+      if (!b) { this.want(cur.loop, r, true).catch(() => {}); return; }
+      const nb = this.nextBoundary(cur, nowF + leadF + Math.round(XFADE * sr), cur.loop.beats);
+      if (nb.at - nowF > commitF) return;
+      this.retime(cur, r, b, nb);
+      this.ratio = r;
+    }
   }
 
-  process(e) {
-    const L = e.outputBuffer.getChannelData(0), R = e.outputBuffer.getChannelData(1);
-    const s = this.samples;
-    const n = this.filter.extract(s, LOOP_BUF);
-    for (let i = 0; i < n; i++) { L[i] = s[2 * i]; R[i] = s[2 * i + 1]; }
-    for (let i = n; i < LOOP_BUF; i++) { L[i] = 0; R[i] = 0; }
-    this.heard += n * this.ratio;
-    while (this.events.length > 1 && this.events[1].at <= this.heard) this.events.shift();
+  // Next spot at or after frame minF that falls on one of `count` equal divisions of the loop (bars, beats, or the loop end)
+  nextBoundary(seg, minF, count) {
+    const unit = seg.loop.len / count, N = seg.N, base = Math.floor((minF - seg.t0F) / N) * N;
+    for (let it = 0; it < 3; it++) for (let k = 0; k < count; k++) {
+      const at = seg.t0F + base + it * N + Math.round(k * unit / seg.ratio);
+      if (at >= minF) return { at, k };
+    }
+    return { at: seg.t0F + base + 3 * N, k: 0 };
   }
 
-  // What the listener hears right now: which loop and where in it (in source frames)
+  makeSeg(loop, ratio, buf, startF, t0F) {
+    const ctx = this.ctx, sr = this.sr, N = buf.length;
+    const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true;
+    const g = ctx.createGain(); src.connect(g); g.connect(this.out);
+    const offF = ((startF - t0F) % N + N) % N;
+    src.start(startF / sr, offF / sr);
+    const seg = { loop, ratio, buf, N, startF, t0F, src, g };
+    this.segs.push(seg);
+    return seg;
+  }
+
+  // A different loop: it starts on its first sample exactly at frame B; the old one fades over its last 3 ms
+  switchTo(cur, loop, ratio, buf, B) {
+    const sr = this.sr, c = Math.round(CUT * sr);
+    cur.g.gain.setValueAtTime(1, (B - c) / sr); cur.g.gain.linearRampToValueAtTime(0, B / sr);
+    cur.src.stop((B + 128) / sr);
+    const seg = this.makeSeg(loop, ratio, buf, B, B);
+    seg.g.gain.setValueAtTime(0, B / sr); seg.g.gain.linearRampToValueAtTime(1, (B + Math.round(0.0015 * sr)) / sr);
+  }
+
+  // Same loop at a new tempo: the new render takes over on a beat, keeping the place in the loop
+  retime(cur, ratio, buf, nb) {
+    const sr = this.sr, x = Math.round(XFADE * sr), B = nb.at;
+    const u = Math.round(nb.k * (cur.loop.len / cur.loop.beats) / ratio);   // that beat's frame in the new render
+    cur.g.gain.setValueAtTime(1, (B - x) / sr); cur.g.gain.linearRampToValueAtTime(0, B / sr);
+    cur.src.stop((B + 128) / sr);
+    const seg = this.makeSeg(cur.loop, ratio, buf, B - x, B - u);
+    seg.g.gain.setValueAtTime(0, (B - x) / sr); seg.g.gain.linearRampToValueAtTime(1, B / sr);
+  }
+
+  // What the listener hears right now: which loop and where in it (in frames of the original)
   heardState() {
-    if (!this.playing || !this.events.length) return null;
-    const lat = (LOOP_BUF + (this.ctx.baseLatency || 0) * this.ctx.sampleRate) * this.ratio;
-    const h = Math.max(0, this.heard - lat);
-    let ev = this.events[0];
-    for (const e of this.events) if (e.at <= h) ev = e;
-    const pos = ((h - ev.at) % ev.loop.len + ev.loop.len) % ev.loop.len;
-    return { loop: ev.loop, pos };
+    if (!this._playing || !this.segs.length) return null;
+    const ctx = this.ctx;
+    let t = ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0);
+    if (ctx.getOutputTimestamp) {
+      const ts = ctx.getOutputTimestamp();
+      if (ts && ts.contextTime > 0 && typeof performance !== "undefined") t = ts.contextTime + Math.max(0, (performance.now() - ts.performanceTime) / 1000);
+    }
+    const tF = Math.round(t * this.sr);
+    let seg = null;
+    for (const s of this.segs) if (s.startF <= tF) seg = s;
+    if (!seg) return { loop: this.segs[0].loop, pos: 0 };
+    const q = ((tF - seg.t0F) % seg.N + seg.N) % seg.N;
+    return { loop: seg.loop, pos: q * seg.loop.len / seg.N };
   }
 }
 
 /* ----- Loop file helpers ----- */
-function trimLossyPadding(buffer, name) {
+// AIFF / AIFC (uncompressed) reader, resampled to the device rate
+async function decodeAiff(ab, ctx) {
+  const v = new DataView(ab);
+  const id = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
+  if (v.byteLength < 12 || id(0) !== "FORM" || !/^AIF[FC]$/.test(id(8))) return null;
+  const ext80 = (o) => {
+    const se = v.getUint16(o), exp = se & 0x7fff, hi = v.getUint32(o + 2), lo = v.getUint32(o + 6);
+    if (!exp && !hi && !lo) return 0;
+    return (se & 0x8000 ? -1 : 1) * (hi * 4294967296 + lo) * Math.pow(2, exp - 16383 - 63);
+  };
+  let o = 12, ch = 0, frames = 0, bits = 0, sr = 0, data = -1, comp = "NONE";
+  while (o + 8 <= v.byteLength) {
+    const ck = id(o), sz = v.getUint32(o + 4), d = o + 8;
+    if (ck === "COMM") { ch = v.getInt16(d); frames = v.getUint32(d + 2); bits = v.getInt16(d + 6); sr = ext80(d + 8); if (id(8) === "AIFC") comp = id(d + 18); }
+    else if (ck === "SSND") data = d + 8 + v.getUint32(d);
+    o = d + sz + (sz & 1);
+  }
+  if (data < 0 || !ch || !frames || !sr || !["NONE", "sowt", "twos"].includes(comp) || bits < 8 || bits > 32) return null;
+  const bytes = Math.ceil(bits / 8), le = comp === "sowt", full = Math.pow(2, bytes * 8 - 1);
+  frames = Math.min(frames, Math.floor((v.byteLength - data) / (bytes * ch)));
+  const src = ctx.createBuffer(ch, frames, sr);
+  const outs = []; for (let c = 0; c < ch; c++) outs.push(src.getChannelData(c));
+  let p = data;
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < ch; c++) {
+      let x = 0;
+      for (let b = 0; b < bytes; b++) x = x * 256 + v.getUint8(p + (le ? bytes - 1 - b : b));
+      if (x >= full) x -= full * 2;
+      outs[c][i] = x / full; p += bytes;
+    }
+  }
+  if (sr === ctx.sampleRate) return src;
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const oc = new OAC(ch, Math.ceil(frames * ctx.sampleRate / sr), ctx.sampleRate);
+  const s = oc.createBufferSource(); s.buffer = src; s.connect(oc.destination); s.start();
+  return oc.startRendering();
+}
+
+// MP3 and AAC files can carry a little silence at each end that the encoder added. Chrome removes it when the
+// file says how much there is (most MP3s and M4As do). When silence is still there, it is cut only if cutting it
+// makes the loop a whole number of beats, so a loop whose last hit really does fade to silence keeps its length.
+function trimLossyPadding(buffer, name, bytes) {
   const lossy = !/\.(wav|wave|aif|aiff|flac)$/i.test(name);
   const chs = [];
   for (let c = 0; c < Math.min(2, buffer.numberOfChannels); c++) chs.push(buffer.getChannelData(c));
   if (chs.length === 1) chs.push(chs[0]);
-  let start = 0, end = chs[0].length;
+  const n = chs[0].length, sr = buffer.sampleRate;
+  let start = 0, end = n;
   if (lossy) {
-    const maxTrim = Math.floor(buffer.sampleRate * 0.06), th = 1e-4;
+    const maxTrim = Math.floor(sr * 0.06), th = 1e-4;
     const loud = (i) => Math.abs(chs[0][i]) > th || Math.abs(chs[1][i]) > th;
-    while (start < maxTrim && start < end - 1 && !loud(start)) start++;
-    while (end > chs[0].length - maxTrim && end > start + 1 && !loud(end - 1)) end--;
+    const bare = bareMp3(bytes);
+    if (bare) {
+      // An MP3 with no gapless header: the decoder leaves the encoder's 1105-sample start-up in, plus padding at the end
+      const lead = Math.round(1105 * sr / bare.rate), beat = beatPeriod(chs, sr, lead, n, name);
+      let len = n - lead;
+      if (beat) { const whole = Math.round(Math.round(len / beat) * beat); if (len - whole >= 0 && len - whole < 2 * 1152 * sr / bare.rate + 64) len = whole; }
+      else { while (len > 1 && !loud(lead + len - 1) && n - lead - len < maxTrim) len--; }
+      start = lead; end = lead + len;
+      return { L: chs[0].slice(start, end), R: chs[1] === chs[0] ? null : chs[1].slice(start, end), trimmedMs: Math.round((n - len) / sr * 1000) };
+    }
+    let lead = 0, tail = 0;
+    while (lead < maxTrim && lead < n - 1 && !loud(lead)) lead++;
+    while (tail < maxTrim && n - tail > lead + 1 && !loud(n - 1 - tail)) tail++;
+    if (lead || tail) {
+      const beat = beatPeriod(chs, sr, lead, n - tail, name);
+      if (!beat) { start = lead; end = n - tail; }          // no clear beat (a pad or a drone): the silence is padding
+      else {
+        const off = (len) => { const b = len / beat; return Math.abs(b - Math.round(b)) * beat; };
+        let best = { s: 0, e: 0, err: off(n) };
+        for (const [s, e] of [[lead, 0], [0, tail], [lead, tail]]) {
+          const err = off(n - s - e);
+          if (err < best.err - sr * 0.003) best = { s, e, err };
+        }
+        if (off(n) > sr * 0.003) { start = best.s; end = n - best.e; }
+      }
+    }
   }
   return {
     L: chs[0].slice(start, end),
     R: chs[1] === chs[0] ? null : chs[1].slice(start, end),
-    trimmedMs: Math.round((start + (chs[0].length - end)) / buffer.sampleRate * 1000)
+    trimmedMs: Math.round((start + (n - end)) / sr * 1000)
   };
+}
+
+// An MP3 whose first frame has no Xing/Info header carries no gapless information. Returns its sample rate, else null.
+function bareMp3(bytes) {
+  if (!bytes || bytes.byteLength < 400) return null;
+  const b = new Uint8Array(bytes, 0, Math.min(bytes.byteLength, 1 << 20));
+  let i = 0;
+  if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) i = 10 + ((b[6] & 127) << 21 | (b[7] & 127) << 14 | (b[8] & 127) << 7 | (b[9] & 127)) + (b[5] & 0x10 ? 10 : 0);
+  while (i < b.length - 4 && b[i] === 0) i++;
+  if (i > b.length - 200 || b[i] !== 0xFF || (b[i + 1] & 0xE0) !== 0xE0) return null;
+  const ver = (b[i + 1] >> 3) & 3, layer = (b[i + 1] >> 1) & 3, sri = (b[i + 2] >> 2) & 3;
+  if (layer !== 1 || ver === 1 || sri === 3) return null;          // not MPEG layer III
+  const rate = [44100, 48000, 32000][sri] / (ver === 3 ? 1 : ver === 2 ? 2 : 4);
+  for (let j = i + 4; j < i + 200; j++) {
+    const t = String.fromCharCode(b[j], b[j + 1], b[j + 2], b[j + 3]);
+    if (t === "Xing" || t === "Info" || t === "VBRI") return null;
+  }
+  return { rate };
+}
+
+// Checks a loop for the two things that make a loop sound wrong where it repeats:
+// a jump where its end meets its start (a click), and a length that is not a whole number of the groove's beats
+// (every pass would land early or late). Returns plain facts; the app words them.
+function checkLoop(loop) {
+  const L = loop.L, R = loop.R || loop.L, n = loop.len, sr = loop.sr;
+  // How far each sample is from where the two before it were heading; a click is a large miss at the loop point
+  const at = (x, i) => x[((i % n) + n) % n];
+  const miss = (i) => Math.max(Math.abs(at(L, i) - 2 * at(L, i - 1) + at(L, i - 2)), Math.abs(at(R, i) - 2 * at(R, i - 1) + at(R, i - 2)));
+  const around = (c) => { let v = 0; for (let k = -3; k <= 3; k++) v = Math.max(v, miss(c + k)); return v; };
+  const local = [];
+  for (let i = 4; i < Math.round(sr * 0.005); i++) local.push(miss(i), miss(n - i));
+  local.sort((a, b) => a - b);
+  const typical = local[Math.floor(local.length * 0.95)] || 0;
+  const beat = beatPeriod([L, R], sr, 0, n, "");
+  // The loop point is compared with the loop's own bar lines, where the music carries on uncut
+  const bpb = loop.bpb || 4, lineAt = [];
+  if (beat) { const nb = Math.round(n / beat); for (let j = bpb; j < nb; j += bpb) lineAt.push(j * beat); if (!lineAt.length) for (let j = 1; j < nb; j++) lineAt.push(j * beat); }
+  else { const div = loop.bars >= 2 ? loop.bars : 2; for (let k = 1; k < div; k++) lineAt.push(k * n / div); }
+  let lines = 0;
+  for (const c of lineAt) lines = Math.max(lines, around(Math.round(c)));
+  const seam = around(0);
+  const click = seam > 0.01 && seam > 3 * Math.max(lines, typical);
+  let offMs = null, grooveBpm = null, beats = null;
+  if (beat) {
+    beats = Math.max(1, Math.round(n / beat));
+    offMs = (n - beats * beat) / sr * 1000;          // + means the file runs long, so each pass lands late
+    grooveBpm = 60 * sr / beat;
+  }
+  return { click, seam, typical: Math.max(lines, typical), offMs, grooveBpm, beats };
+}
+
+// Beat length in samples, measured from where the hits fall (or from "96 BPM" in the file name)
+function beatPeriod(chs, sr, from, to, name) {
+  const nm = name && (name.match(/(\d{2,3}(?:\.\d+)?)\s*[-_ ]?\s*bpm/i) || name.match(/bpm\s*[-_ ]?\s*(\d{2,3}(?:\.\d+)?)/i));
+  if (nm) { const v = parseFloat(nm[1]); if (v >= 40 && v <= 240) return 60 / v * sr; }
+  const m = new Float32Array(to - from);
+  for (let i = 0; i < m.length; i++) m[i] = 0.5 * (chs[0][from + i] + chs[1][from + i]);
+  if (m.length < sr * 1.5 || typeof stretchOnsets === "undefined") return null;
+  const approx = autocorrBpm(m, sr);
+  if (!approx) return null;
+  let on = stretchOnsets(m, sr).filter((o) => o.at > sr * 0.005 && o.at < m.length - sr * 0.005);
+  if (on.length < 4) return null;
+  const top = Math.max(...on.map((o) => o.strength));
+  on = on.filter((o) => o.strength >= top * 0.5).map((o) => o.at).sort((a, b) => a - b);
+  if (on.length < 4) return null;
+  // Fit the hits to a half-beat grid, then refine the grid spacing by least squares
+  let u = 30 / approx * sr;
+  for (let pass = 0; pass < 3; pass++) {
+    const pts = [];
+    for (const t of on) { const k = Math.round((t - on[0]) / u), r = t - on[0] - k * u; if (Math.abs(r) < u * 0.2) pts.push([k, t]); }
+    if (pts.length < 4) return null;
+    const mk = pts.reduce((s, p) => s + p[0], 0) / pts.length, mt = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    let num = 0, den = 0; for (const [k, t] of pts) { num += (k - mk) * (t - mt); den += (k - mk) * (k - mk); }
+    if (!den) return null;
+    u = num / den;
+  }
+  // Only trust it when most of the strong hits sit on that grid
+  let fit = 0;
+  for (const t of on) { const k = Math.round((t - on[0]) / u), r = Math.abs(t - on[0] - k * u); if (r < Math.max(sr * 0.003, u * 0.04)) fit++; }
+  return fit >= Math.max(4, on.length * 0.7) ? 2 * u : null;
 }
 
 function autocorrBpm(L, sr) {
@@ -504,4 +712,4 @@ function onsetTimes(L, sr) {
   return out.length ? out : [0];
 }
 
-if (typeof module !== "undefined") module.exports = { LoopEngine, loopMeta, guessBpm, autocorrBpm, onsetTimes, KEYS, VOICINGS, STYLES };
+if (typeof module !== "undefined") module.exports = { LoopEngine, loopMeta, holdParam, checkLoop, trimLossyPadding, beatPeriod, guessBpm, autocorrBpm, onsetTimes, KEYS, VOICINGS, STYLES };

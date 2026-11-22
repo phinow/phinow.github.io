@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loopadicious self-test</title>
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<style>
+  :root { color-scheme: dark; --bg: #0b0b0b; --ink: #f2f2f2; --muted: #9a9a9a; --line: #2a2a2a; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 28px 0 8px; border-top: 1px solid var(--line); padding-top: 18px; }
+  p { color: var(--muted); margin: 6px 0; }
+  button { font: inherit; font-weight: 600; background: var(--ink); color: var(--bg); border: 0; border-radius: 8px; padding: 10px 18px; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 5px 0; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 26px 1fr; gap: 6px; }
+  li .m { font-weight: 700; }
+  li.ok .m { color: #8fe3a0; } li.bad .m { color: #ff8a8a; } li.info .m { color: var(--muted); }
+  .sum { font-size: 18px; font-weight: 700; margin-top: 22px; }
+  a { color: var(--ink); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Loopadicious self-test</h1>
+  <p>Checks the loop player on this computer, then checks every loop saved in your slots. It only reads your loops and settings; it never changes or deletes them. Nothing is played out loud. Takes about a minute.</p>
+  <p><button id="run">Run the test</button> &nbsp; <a href="./">Back to Loopadicious</a></p>
+  <div id="out"></div>
+</main>
+<script src="js/stretch.js"></script>
+<script src="js/engine.js"></script>
+<script>
+const out = document.getElementById("out");
+let section = null, fails = 0, passes = 0;
+function head(t, note) { const h = document.createElement("h2"); h.textContent = t; out.append(h); if (note) { const p = document.createElement("p"); p.textContent = note; out.append(p); } section = document.createElement("ul"); out.append(section); }
+function line(kind, text) {
+  const li = document.createElement("li"); li.className = kind;
+  const m = document.createElement("span"); m.className = "m"; m.textContent = kind === "ok" ? "✓" : kind === "bad" ? "✗" : "·";
+  const t = document.createElement("span"); t.textContent = text; li.append(m, t); section.append(li);
+  if (kind === "ok") passes++; if (kind === "bad") fails++;
+}
+const pause = () => new Promise((r) => setTimeout(r, 0));
+
+/* Test loops made here: a click on every beat (timing is unambiguous), and a drum pattern with a steady tone */
+function clickLoop(sr, bpm, beats, freq, amp, bpb) {
+  const len = Math.round(beats * 60 / bpm * sr), L = new Float32Array(len);
+  for (let b = 0; b < beats; b++) { const s = Math.round(b * 60 / bpm * sr); for (let i = 0; i < 0.004 * sr; i++) L[s + i] += Math.sin(2 * Math.PI * freq * i / sr) * Math.exp(-i / sr * 900) * amp; }
+  return loopMeta({ id: "t" + bpm + freq, name: bpm + " BPM test", bpm, dur: len / sr, len, L, R: L, sr, bpb: bpb || 4 });
+}
+function drumLoop(sr, bpm, beats) {
+  const len = Math.round(beats * 60 / bpm * sr), L = new Float32Array(len), R = new Float32Array(len), beat = 60 / bpm * sr;
+  let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  const hit = (start, fn, dur) => { for (let i = 0; i < dur * sr; i++) { const j = Math.round(start) + i, v = fn(i / sr); L[j % len] += v; R[j % len] += v * 0.9; } };
+  for (let b = 0; b < beats; b++) {
+    if (b % 2 === 0) hit(b * beat, (s) => Math.sin(2 * Math.PI * (55 + 80 * Math.exp(-s * 30)) * s) * Math.exp(-s * 9) * 0.7, 0.5);
+    else hit(b * beat, (s) => rnd() * Math.exp(-s * 22) * 0.3, 0.3);
+    hit(b * beat + beat / 2, (s) => rnd() * Math.exp(-s * 60) * 0.1, 0.08);
+  }
+  const c = Math.round(220 * len / sr); for (let i = 0; i < len; i++) { const v = 0.12 * Math.sin(2 * Math.PI * c * i / len); L[i] += v; R[i] += v; }
+  return loopMeta({ id: "d" + bpm, name: "drum test", bpm, dur: len / sr, len, L, R, sr, bpb: 4 });
+}
+const render = (L, R, sr, ratio) => new Promise((res) => setTimeout(() => res(stretchLoop(L, R, sr, ratio)), 0));
+
+/* Runs the real loop engine inside an offline renderer, calling its scheduler every 25 ms of audio time */
+async function offline(sr, seconds, actions, onSeg) {
+  const ctx = new OfflineAudioContext(2, Math.round(seconds * sr), sr);
+  const eng = new LoopEngine(ctx, ctx.destination, render);
+  if (onSeg) { const mk = eng.makeSeg.bind(eng); eng.makeSeg = (...a) => { const s = mk(...a); onSeg(s); return s; }; }
+  const acts = actions.slice().sort((a, b) => a.at - b.at), steps = new Set();
+  for (let t = 0.025; t < seconds - 0.05; t += 0.025) steps.add(Math.round(t * sr / 128) * 128 / sr);
+  for (const t of steps) ctx.suspend(t).then(async () => {
+    while (acts.length && acts[0].at <= t + 1e-9) await acts.shift().fn(eng);
+    await pause(); await pause(); eng.tick(); ctx.resume();
+  });
+  const b = await ctx.startRendering();
+  return b.getChannelData(0);
+}
+
+async function engineTests(sr) {
+  if (!section || sr === 48000) head("1. The loop player", "Made-up test loops, played by the same code the app uses, checked sample by sample, at both common sample rates.");
+  const k = `${sr / 1000} kHz · `;
+  { // own tempo: the recording itself
+    const loop = drumLoop(sr, 96, 8); let startF = 0;
+    const x = await offline(sr, 21, [{ at: 0.1, fn: (e) => { e.setTarget(96); e.play(loop); } }], (s) => { startF = s.startF; });
+    let err = 0; for (let i = startF + 200; i < x.length; i++) err = Math.max(err, Math.abs(x[i] - 0.81 * loop.L[(i - startF) % loop.len]));
+    line(err < 1e-5 ? "ok" : "bad", k + `At a loop's own tempo the original recording plays untouched, over ${Math.floor((x.length - startF) / loop.len)} repeats (largest difference ${err.toExponential(1)}).`);
+  }
+  for (const target of [76.8, 86.4, 105.6, 120]) { // other tempos: the render, repeated with no gap
+    const loop = drumLoop(sr, 96, 8), ratio = target / 96, ref = stretchLoop(loop.L, loop.R, sr, ratio); let startF = 0;
+    const x = await offline(sr, 16, [{ at: 0.1, fn: (e) => { e.setTarget(target); e.play(loop); } }], (s) => { startF = s.startF; });
+    let err = 0; for (let i = startF + 200; i < x.length; i++) err = Math.max(err, Math.abs(x[i] - 0.81 * ref.L[(i - startF) % ref.L.length]));
+    // each hit of the recording appears untouched at its new place
+    let worst = 1; const per = 60 / 96 * sr;
+    let shift = 0;
+    for (let b = 0; b < 8; b++) {
+      const a = Math.round(b * per), o = Math.round(a / ratio); let bestC = -1, bestS = 0;
+      for (let sh = -Math.round(0.002 * sr); sh <= Math.round(0.002 * sr); sh++) {
+        let xy = 0, xx = 1e-12, yy = 1e-12;
+        for (let i = 0; i < 0.012 * sr; i++) { const u = loop.L[(a + i) % loop.len], v = ref.L[(o + sh + i + ref.L.length) % ref.L.length]; xy += u * v; xx += u * u; yy += v * v; }
+        const c = xy / Math.sqrt(xx * yy); if (c > bestC) { bestC = c; bestS = sh; }
+      }
+      if (bestC < worst) worst = bestC; shift = Math.max(shift, Math.abs(bestS));
+    }
+    const ok = err < 1e-5 && ref.L.length === Math.round(loop.len / ratio) && worst > 0.999 && shift / sr < 0.0002;
+    line(ok ? "ok" : "bad", k + `${Math.round(ratio * 100)}% speed: no gap at the loop point, exact length, every hit identical to the recording (match ${worst.toFixed(4)}, placed within ${(shift / sr * 1000).toFixed(2)} ms of its grid spot).`);
+    await pause();
+  }
+  // every hit on its grid through tempo changes and switches in all three modes
+  const A = clickLoop(sr, 96, 8, 3000, 0.8), B = clickLoop(sr, 120, 8, 1500, 0.6), C = clickLoop(sr, 72, 6, 2200, 0.7, 3);
+  const runs = [
+    ["Tempo changes and switching at the next bar", 40, [[0.1, (e) => { e.setTarget(96); e.play(A); }], [7.33, (e) => e.setTarget(105.6)], [15.1, (e) => e.queue(B, "bar")], [22.2, (e) => e.setTarget(88)], [28.7, (e) => e.queue(C, "bar")]]],
+    ["Switching at the end of the loop, with a change of mind", 40, [[0.1, (e) => { e.setTarget(100); e.play(B); }], [3.05, (e) => e.queue(A, "loop")], [12.4, (e) => e.queue(C, "loop")], [13, (e) => e.queue(A, "loop")], [25.9, (e) => e.setTarget(130)]]],
+    ["Switching straight away, and the tempo limits (50% and 200%)", 30, [[0.1, (e) => { e.setTarget(84); e.play(C); }], [4.321, (e) => e.queue(B, "now")], [9.876, (e) => e.queue(A, "now")], [15.5, (e) => e.setTarget(48)], [22.5, (e) => e.setTarget(200)]]],
+  ];
+  for (const [name, secs, acts] of runs) {
+    const log = [];
+    const x = await offline(sr, secs, acts.map(([at, fn]) => ({ at, fn })), (s) => log.push({ loop: s.loop, ratio: s.ratio, N: s.N, t0F: s.t0F, startF: s.startF }));
+    const exp = [], xf = Math.round(0.01 * sr);
+    for (let i = 0; i < log.length; i++) {
+      const s = log[i], next = log[i + 1], prev = log[i - 1];
+      const end = next ? (next.loop === s.loop ? next.startF + xf : next.startF) : x.length;
+      const from = prev && prev.loop === s.loop ? s.startF + xf : s.startF, bl = s.loop.len / s.loop.beats;
+      for (let base = s.t0F - s.N; base < end; base += s.N) for (let k = 0; k < s.loop.beats; k++) { const at = base + Math.round(k * bl / s.ratio); if (at >= from && at < end && at < x.length - 2000) exp.push({ at, first: at - s.startF < 400 }); }
+    }
+    const on = []; let last = -1e9;
+    for (let i = 1; i < x.length - 2000; i++) if (Math.abs(x[i]) > 0.05 && i - last > 0.04 * sr) { on.push(i); last = i; }
+    let worst = 0, missing = 0; const used = new Set();
+    for (const e of exp) { let best = null; for (const t of on) if (Math.abs(t - e.at) < 400 && (best === null || Math.abs(t - e.at) < Math.abs(best - e.at))) best = t; if (best === null) { missing++; continue; } used.add(best); if (!e.first) worst = Math.max(worst, Math.abs(best - e.at)); }
+    const extra = on.filter((t) => !used.has(t)).length, ms = worst / sr * 1000;
+    line(!missing && !extra && ms < 0.2 ? "ok" : "bad", k + `${name}: ${exp.length} hits, ${missing} missing, ${extra} extra, furthest from the grid ${ms.toFixed(2)} ms.`);
+    await pause();
+  }
+}
+
+async function liveTest() {
+  head("2. Playing live while the computer is busy", "A loop plays silently for about 10 seconds while this page freezes itself four times (0.15 to 1.2 seconds). The recording must match what should have played, sample for sample.");
+  const ctx = new AudioContext(), sr = ctx.sampleRate;
+  const code = "class Rec extends AudioWorkletProcessor { process(i) { const c = i[0]; if (c && c[0]) this.port.postMessage(c[0].slice(0)); return true; } } registerProcessor('rec', Rec);";
+  await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+  const loop = clickLoop(sr, 96, 8, 3000, 0.5);
+  for (const f of [220, 330, 440]) { const c = Math.round(f * loop.len / sr); for (let i = 0; i < loop.len; i++) loop.L[i] += 0.1 * Math.sin(2 * Math.PI * c * i / loop.len); }
+  const silent = ctx.createGain(); silent.gain.value = 0; silent.connect(ctx.destination);
+  const eng = new LoopEngine(ctx, silent, render), rec = new AudioWorkletNode(ctx, "rec"), chunks = [];
+  rec.port.onmessage = (e) => chunks.push(e.data);
+  eng.out.connect(rec); rec.connect(silent);
+  await ctx.resume();
+  eng.setTarget(96 * 0.9); eng.play(loop);
+  const t0 = performance.now();
+  for (const [at, ms] of [[2000, 150], [3500, 300], [5000, 600], [7000, 1200]]) {
+    await new Promise((r) => setTimeout(r, Math.max(0, at - (performance.now() - t0))));
+    const s = performance.now(); while (performance.now() - s < ms) { /* frozen on purpose */ }
+  }
+  await new Promise((r) => setTimeout(r, 1500));
+  eng.stop(); await new Promise((r) => setTimeout(r, 300)); ctx.close();
+  const n = chunks.reduce((a, c) => a + c.length, 0), x = new Float32Array(n); let o = 0; for (const c of chunks) { x.set(c, o); o += c.length; }
+  const ref = stretchLoop(loop.L, loop.R, sr, 0.9).L, N = ref.length, first = x.findIndex((v) => Math.abs(v) > 1e-4);
+  let start = first, best = 1e9;
+  for (let s = first - 300; s < first + 300; s++) { let e = 0; for (let i = 400; i < 4000; i++) e += Math.abs(x[s + i] - 0.81 * ref[i % N]); if (e < best) { best = e; start = s; } }
+  let wrong = 0; for (let i = start + 400; i < n - sr * 0.6; i++) if (Math.abs(x[i] - 0.81 * ref[(i - start) % N]) > 1e-3) wrong++;
+  const secs = (n - sr * 0.6 - start) / sr;
+  line(wrong === 0 && secs > 8 ? "ok" : "bad", `${secs.toFixed(1)} seconds recorded through 2.25 seconds of freezes: ${wrong} samples out of place, no dropouts.`);
+}
+
+async function yourLoops() {
+  head("3. Your loops", "Each saved loop: does its end meet its start cleanly, is the file a whole number of beats, and does every hit stay intact at your tempo.");
+  let S = {};
+  try { S = JSON.parse(localStorage.getItem("pad-loop-station:v1") || "{}"); } catch (e) { /* none */ }
+  if (indexedDB.databases) { const dbs = await indexedDB.databases(); if (!dbs.some((d) => d.name === "pad-loop-station")) { line("info", "No saved loops in this browser. Open the test in the browser you use for Loopadicious."); return; } }
+  const db = await new Promise((res, rej) => {
+    const r = indexedDB.open("pad-loop-station", 1);
+    r.onupgradeneeded = (e) => e.target.transaction.abort();   // never create anything
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }).catch(() => null);
+  if (!db || !db.objectStoreNames.contains("loops")) { line("info", "No saved loops in this browser."); if (db) db.close(); return; }
+  const recs = await new Promise((res) => { const q = db.transaction("loops", "readonly").objectStore("loops").getAll(); q.onsuccess = () => res(q.result); q.onerror = () => res([]); });
+  db.close();
+  const slots = (S.slots || []).filter((s) => s.loopId), target = S.target || 96;
+  if (!slots.length) { line("info", "Your slots are empty."); return; }
+  const ctx = new AudioContext();
+  for (const slot of slots) {
+    const rec = recs.find((r) => r.id === slot.loopId);
+    if (!rec) { line("info", `${slot.label}: the slot points at a loop that is not stored.`); continue; }
+    let buf;
+    try { buf = await ctx.decodeAudioData(rec.data.slice(0)); } catch (e) { buf = await decodeAiff(rec.data.slice(0), ctx); }
+    if (!buf) { line("bad", `${slot.label}: could not read the file.`); continue; }
+    let L, R;
+    if (rec.exact) { L = buf.getChannelData(0).slice(); R = buf.numberOfChannels > 1 ? buf.getChannelData(1).slice() : L; }
+    else { const t = trimLossyPadding(buf, rec.name, rec.data); L = t.L; R = t.R || L; }
+    const loop = { name: rec.name, L, R, len: L.length, sr: buf.sampleRate, dur: L.length / buf.sampleRate, bpb: rec.bpb || 4 };
+    loop.bpm = rec.bpm || guessBpm(rec.name, L, buf.sampleRate, loop.dur, loop.bpb).bpm;
+    loopMeta(loop);
+    const c = checkLoop(loop), name = `${slot.label} (${rec.name.replace(/\.[^.]+$/, "")})`;
+    line(c.click ? "bad" : "ok", c.click ? `${name}: its end does not meet its start cleanly, so it can click each time it repeats. Use Trim in the app to cut it again.` : `${name}: the loop point is clean.`);
+    if (c.offMs === null) line("info", `${name}: no clear beat to measure its length against (fine for pads and drones).`);
+    else if (Math.abs(c.offMs) > 4) line("bad", `${name}: the file is ${Math.round(Math.abs(c.offMs))} ms ${c.offMs > 0 ? "longer" : "shorter"} than ${c.beats} beats, so each pass lands ${Math.round(Math.abs(c.offMs))} ms ${c.offMs > 0 ? "late" : "early"}. Use Trim in the app to cut it to exact bars.`);
+    else line("ok", `${name}: exactly ${c.beats} beats long (within ${Math.max(0.1, Math.abs(c.offMs)).toFixed(1)} ms).`);
+    if (c.grooveBpm) {
+      let g = c.grooveBpm; while (g < loop.bpm * 0.75) g *= 2; while (g > loop.bpm * 1.5) g /= 2;
+      if (Math.abs(g / loop.bpm - 1) > 0.015) line("bad", `${name}: its own tempo is set to ${loop.bpm} BPM but the hits are at ${g.toFixed(1)} BPM, so it plays off the tempo shown. Set Own tempo in the app's ••• menu to ${g.toFixed(1)}.`);
+    }
+    const ratio = Math.min(2, Math.max(0.5, target / loop.bpm));
+    if (ratio === 1) line("ok", `${name}: at ${target} BPM it plays the original recording untouched.`);
+    else {
+      const r = stretchLoop(L, R, loop.sr, ratio), hits = stretchOnsets(Float32Array.from(L, (v, i) => 0.5 * (v + R[i])), loop.sr);
+      line(r.L.length === Math.round(L.length / ratio) ? "ok" : "bad", `${name}: at ${target} BPM (${Math.round(ratio * 100)}% speed) ${r.anchors} of ${hits.length} hits are kept exactly as recorded, on the grid, with no doubles or chopped starts; the rest of the sound is stretched smoothly.`);
+    }
+    await pause();
+  }
+  ctx.close();
+}
+
+document.getElementById("run").addEventListener("click", async (e) => {
+  e.target.disabled = true; out.textContent = ""; fails = passes = 0;
+  try {
+    await engineTests(48000);
+    await engineTests(44100);
+    await liveTest();
+    await yourLoops();
+  } catch (err) { head("Error"); line("bad", String(err && err.message || err)); }
+  const p = document.createElement("p"); p.className = "sum";
+  p.textContent = fails ? `${fails} problem${fails > 1 ? "s" : ""} found, ${passes} checks passed.` : `All ${passes} checks passed.`;
+  out.append(p); e.target.disabled = false; e.target.textContent = "Run again";
+  window.selfTest = { fails, passes, text: out.innerText };
+});
+</script>
+</body>
+</html>

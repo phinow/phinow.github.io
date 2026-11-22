@@ -311,7 +311,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); margin: 0; }
 <footer class="foot">
   <span>1 to 9 pick a loop · Space plays or stops · Esc stops the pad</span>
   <span>Drop a file on a slot · Files over 30 s open the trimmer</span>
-  <span>Tempo change uses <a href="https://github.com/cutterbl/SoundTouchJS">SoundTouch JS</a> (LGPL-2.1)</span>
+  <span>Tempo changes keep every hit on the grid and the pitch the same · <a href="test.html">Self-test</a></span>
 </footer>
 
 <div class="drop-overlay" id="drop-overlay" hidden><p>Drop to add loops</p></div>
@@ -344,8 +344,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); margin: 0; }
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
-<script src="js/soundtouch.js"></script>
-<script>const ST = { SoundTouch, SimpleFilter };</script>
+<script src="js/stretch.js"></script>
 <script src="js/engine.js"></script>
 <script src="js/app.js"></script>
 </body>

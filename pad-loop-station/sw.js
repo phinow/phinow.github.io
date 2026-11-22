@@ -1,10 +1,11 @@
 // Keeps the app working offline. Bump VERSION when files change so phones and laptops pick up the update.
-const VERSION = "pad-loop-station-v5";
+const VERSION = "pad-loop-station-v6";
 const FILES = [
   "./",
   "index.html",
   "manifest.webmanifest",
-  "js/soundtouch.js",
+  "js/stretch.js",
+  "js/stretch-worker.js",
   "js/engine.js",
   "js/app.js",
   "icons/icon-192.png",

@@ -25,11 +25,42 @@ function audio() {
   master.connect(comp); comp.connect(ctx.destination);
   pads = new PadEngine(ctx, master);
   pads.setSpace(S.pad.space); pads.setVolume(S.pad.vol);
-  loops = new LoopEngine(ctx, master, ST);
+  loops = new LoopEngine(ctx, master, makeStretcher());
+  loops.onError = () => toast("Could not set that loop's tempo. Try a different tempo, or reload the app.");
   loops.setTarget(S.target); loops.setVolume(S.loopVol);
   if (ctx.addEventListener) ctx.addEventListener("statechange", updatePill);
   return ctx;
 }
+/* ----- Tempo renders run in a background worker so the page never stalls ----- */
+function makeStretcher() {
+  let worker = null;
+  try { worker = new Worker("js/stretch-worker.js"); } catch (e) { worker = null; }
+  const queue = []; let busy = null, nextId = 1;
+  const runHere = (job) => setTimeout(() => {
+    try { finish(job, stretchLoop(job.L, job.R, job.sr, job.ratio)); } catch (e) { fail(job, e); }
+  }, 0);
+  function pump() {
+    while (!busy && queue.length) {
+      let i = queue.findIndex((j) => j.urgent); if (i < 0) i = 0;
+      const job = queue.splice(i, 1)[0];
+      if (job.stale && job.stale()) { job.reject(new Error("stale")); continue; }
+      busy = job;
+      if (worker) worker.postMessage({ id: job.id, L: job.L, R: job.R, sr: job.sr, ratio: job.ratio });
+      else runHere(job);
+    }
+  }
+  function finish(job, out) { if (busy !== job) return; busy = null; job.resolve({ L: out.L, R: out.R }); pump(); }
+  function fail(job, err) { if (busy !== job) return; busy = null; job.reject(err); pump(); }
+  if (worker) {
+    worker.onmessage = (e) => { const job = busy; if (!job || e.data.id !== job.id) return; if (e.data.error) fail(job, new Error(e.data.error)); else finish(job, e.data); };
+    worker.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); worker = null; if (busy) runHere(busy); };   // fall back to rendering on the page
+  }
+  return (L, R, sr, ratio, opt = {}) => new Promise((resolve, reject) => {
+    queue.push({ id: nextId++, L, R, sr, ratio, urgent: !!opt.urgent, stale: opt.stale, resolve, reject });
+    pump();
+  });
+}
+
 async function wake() {
   audio();
   if (ctx.state !== "running") { try { await ctx.resume(); } catch (e) { /* blocked until a tap */ } }
@@ -82,48 +113,10 @@ function decodeNative(ab) {
   });
 }
 
-// AIFF / AIFC (uncompressed) reader, resampled to the device rate
-async function decodeAiff(ab) {
-  const v = new DataView(ab);
-  const id = (o) => String.fromCharCode(v.getUint8(o), v.getUint8(o + 1), v.getUint8(o + 2), v.getUint8(o + 3));
-  if (v.byteLength < 12 || id(0) !== "FORM" || !/^AIF[FC]$/.test(id(8))) return null;
-  const ext80 = (o) => {
-    const se = v.getUint16(o), exp = se & 0x7fff, hi = v.getUint32(o + 2), lo = v.getUint32(o + 6);
-    if (!exp && !hi && !lo) return 0;
-    return (se & 0x8000 ? -1 : 1) * (hi * 4294967296 + lo) * Math.pow(2, exp - 16383 - 63);
-  };
-  let o = 12, ch = 0, frames = 0, bits = 0, sr = 0, data = -1, comp = "NONE";
-  while (o + 8 <= v.byteLength) {
-    const ck = id(o), sz = v.getUint32(o + 4), d = o + 8;
-    if (ck === "COMM") { ch = v.getInt16(d); frames = v.getUint32(d + 2); bits = v.getInt16(d + 6); sr = ext80(d + 8); if (id(8) === "AIFC") comp = id(d + 18); }
-    else if (ck === "SSND") data = d + 8 + v.getUint32(d);
-    o = d + sz + (sz & 1);
-  }
-  if (data < 0 || !ch || !frames || !sr || !["NONE", "sowt", "twos"].includes(comp) || bits < 8 || bits > 32) return null;
-  const bytes = Math.ceil(bits / 8), le = comp === "sowt", full = Math.pow(2, bytes * 8 - 1);
-  frames = Math.min(frames, Math.floor((v.byteLength - data) / (bytes * ch)));
-  const src = ctx.createBuffer(ch, frames, sr);
-  const outs = []; for (let c = 0; c < ch; c++) outs.push(src.getChannelData(c));
-  let p = data;
-  for (let i = 0; i < frames; i++) {
-    for (let c = 0; c < ch; c++) {
-      let x = 0;
-      for (let b = 0; b < bytes; b++) x = x * 256 + v.getUint8(p + (le ? bytes - 1 - b : b));
-      if (x >= full) x -= full * 2;
-      outs[c][i] = x / full; p += bytes;
-    }
-  }
-  if (sr === ctx.sampleRate) return src;
-  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-  const oc = new OAC(ch, Math.ceil(frames * ctx.sampleRate / sr), ctx.sampleRate);
-  const s = oc.createBufferSource(); s.buffer = src; s.connect(oc.destination); s.start();
-  return oc.startRendering();
-}
-
 async function decode(ab) {
   try { return await decodeNative(ab.slice(0)); }
   catch (e) {
-    const aiff = await decodeAiff(ab);
+    const aiff = await decodeAiff(ab, ctx);
     if (aiff) return aiff;
     throw e;
   }
@@ -188,7 +181,7 @@ const bpbFromLabel = (label) => (/\b3\s*\/\s*4\b|\b6\s*\/\s*8\b|waltz/i.test(lab
 function loopFromBuffer(rec, buf) {
   let L, R;
   if (rec.exact) { L = buf.getChannelData(0).slice(); R = buf.numberOfChannels > 1 ? buf.getChannelData(1).slice() : null; }
-  else { const t = trimLossyPadding(buf, rec.name); L = t.L; R = t.R; }
+  else { const t = trimLossyPadding(buf, rec.name, rec.data); L = t.L; R = t.R; }
   const loop = { id: rec.id, name: displayName(rec.name), L, R: R || L, len: L.length, dur: L.length / buf.sampleRate, sr: buf.sampleRate, bpb: rec.bpb || 4 };
   if (rec.bpm) { loop.bpm = rec.bpm; loop.how = rec.how || "set by you"; }
   else { const g = guessBpm(rec.name, L, buf.sampleRate, loop.dur, loop.bpb); loop.bpm = g.bpm; loop.how = g.how; rec.bpm = g.bpm; rec.how = g.how; }
@@ -243,7 +236,7 @@ async function addFiles(files, slotId) {
     toast(all.length ? "Those aren't audio files. Use MP3, WAV, M4A or AIFF." : "Nothing came through. Drag the files from Finder, or use Add loop files.");
     return;
   }
-  let added = 0; const failed = [];
+  let added = 0; const failed = [], warn = [];
   let lastGroup = (slotById(slotId) || slotById(S.selected) || { group: "worship" }).group;
   for (let i = 0; i < list.length; i++) {
     const f = list[i];
@@ -253,14 +246,15 @@ async function addFiles(files, slotId) {
     toast(`Opening ${f.name}...`, 60000);
     try {
       const r = await loadIntoSlot(f, slot);
-      if (r === "added") added++;
+      if (r === "added") { added++; const l = loopOf(slot), w = l && loopProblems(l); if (w) warn.push(`${slot.label}: ${w}`); }
     } catch (e) { failed.push(f.name); }
   }
   renderSlots(); renderTempo();
   const parts = [];
   if (added) parts.push(`Added ${added} loop${added > 1 ? "s" : ""}.`);
   if (failed.length) parts.push(`Couldn't open ${failed.join(", ")}. Save ${failed.length > 1 ? "them" : "it"} as WAV or MP3 and try again.`);
-  if (parts.length) toast(parts.join(" "), failed.length ? 9000 : 4000); else $("#toast").hidden = true;
+  if (warn.length) parts.push(warn.join(" ") + " Use Trim in the ••• menu to cut it again.");
+  if (parts.length) toast(parts.join(" "), failed.length || warn.length ? 12000 : 4000); else $("#toast").hidden = true;
 }
 
 async function loadIntoSlot(file, slot) {
@@ -366,6 +360,7 @@ function pickFileFor(slotId) { pickSlot = slotId; $("#slot-file-in").click(); }
 
 function renderSlots() {
   closeMenu();
+  if (loops) loops.prepare(orderedSlots().map(loopOf));   // render every slot at the current tempo ahead of time
   const wrap = $("#slots");
   wrap.textContent = "";
   const heard = loops && loops.heardState();
@@ -460,6 +455,7 @@ function openMenu(li, slot, btn) {
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
     field.append(document.createTextNode("Own tempo"), inp);
     m.append(field);
+    m.append(toolBtn("Check loop", `Check how ${slot.label} repeats`, () => { closeMenu(); reportLoop(slot, loop); }));
     m.append(toolBtn("Trim", `Trim ${slot.label}`, () => { closeMenu(); trimSlot(slot); }));
     m.append(toolBtn("Replace file", `Replace the file in ${slot.label}`, () => { closeMenu(); pickFileFor(slot.id); }));
   }
@@ -472,6 +468,34 @@ function openMenu(li, slot, btn) {
 }
 document.addEventListener("click", closeMenu);
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && openMenuEl) { e.stopPropagation(); closeMenu(); } }, true);
+
+/* ----- Loop check: is the loop point clean, and is the file a whole number of beats? ----- */
+function loopFacts(loop) {
+  const r = checkLoop(loop), out = { r, problems: [], tempo: "" };
+  if (r.click) out.problems.push("its end does not meet its start cleanly, so it can click each time it repeats");
+  if (r.offMs !== null && Math.abs(r.offMs) > 4) {
+    const ms = Math.round(Math.abs(r.offMs));
+    out.problems.push(`the file is ${ms} ms ${r.offMs > 0 ? "longer" : "shorter"} than ${r.beats} beats, so each pass lands ${ms} ms ${r.offMs > 0 ? "late" : "early"}`);
+  }
+  if (r.grooveBpm) {
+    let g = r.grooveBpm;
+    while (g < loop.bpm * 0.75) g *= 2;
+    while (g > loop.bpm * 1.5) g /= 2;
+    g = Math.round(g * 10) / 10;
+    if (Math.abs(g / loop.bpm - 1) > 0.015) out.tempo = `The hits are at ${fmt(g)} BPM but its own tempo is set to ${fmt(loop.bpm)}, so it plays off the tempo shown. Set Own tempo in ••• to ${fmt(g)}.`;
+  }
+  return out;
+}
+function loopProblems(loop) {
+  const f = loopFacts(loop);
+  return f.problems.length ? f.problems.join(", and ") + "." : f.tempo || "";
+}
+function reportLoop(slot, loop) {
+  const f = loopFacts(loop), name = slot.label;
+  if (f.problems.length) { toast(`${name}: ${f.problems.join(", and ")}. Use Trim to cut it again. ${f.tempo}`.trim(), 14000); return; }
+  const len = f.r.offMs !== null ? ` and exactly ${f.r.beats} beats long (within ${Math.max(0.1, Math.abs(f.r.offMs)).toFixed(1)} ms)` : "";
+  toast(`${name}: loop point clean${len}. It repeats with no gap and no click. ${f.tempo}`.trim(), f.tempo ? 14000 : 8000);
+}
 
 function toolBtn(text, label, fn) {
   const b = document.createElement("button");
