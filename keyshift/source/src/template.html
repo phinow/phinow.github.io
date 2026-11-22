@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KeyShift Tutorial Transposer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=IBM+Plex+Mono:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  /* Layout: a narrow control column beside the player on wide screens; one stacked column on phones.
+     The player (falling notes over a keyboard) carries the page. */
+  --paper: #f3f3f1;
+  --surface: #ffffff;
+  --stage: #fafaf9;
+  --ink: #131313;
+  --muted: #6b6b67;
+  --line: #dcdcd8;
+  --accent: #d2261d;
+  --lh: #2457c5;
+  --display: 'Archivo', 'Arial Narrow', 'Helvetica Neue', Arial, sans-serif;
+  --body: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0c0c0c;
+    --surface: #151515;
+    --stage: #101010;
+    --ink: #f0f0ee;
+    --muted: #9a9a95;
+    --line: #2b2b29;
+    --accent: #ff4b3e;
+    --lh: #5d8dff;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0c0c0c;
+  --surface: #151515;
+  --stage: #101010;
+  --ink: #f0f0ee;
+  --muted: #9a9a95;
+  --line: #2b2b29;
+  --accent: #ff4b3e;
+  --lh: #5d8dff;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 15px/1.5 var(--body);
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.top {
+  display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  padding: 18px max(16px, env(safe-area-inset-left)) 6px;
+  max-width: 1180px; margin: 0 auto;
+}
+.brand { font: 800 26px/1 var(--display); letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
+.brand i { display: inline-block; width: 10px; height: 22px; background: var(--accent); border-radius: 2px; }
+.tag { margin: 0; color: var(--muted); }
+
+main {
+  max-width: 1180px; margin: 0 auto; padding: 10px 16px 24px;
+  display: grid; gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "source" "key" "player" "chart" "save";
+}
+@media (min-width: 960px) {
+  main {
+    grid-template-columns: 340px minmax(0, 1fr);
+    grid-template-areas: "source player" "key player" "chart player" "save player";
+    align-items: start;
+  }
+  #playerPanel { position: sticky; top: 12px; }
+}
+#source { grid-area: source; } #keyPanel { grid-area: key; } #playerPanel { grid-area: player; }
+#chartPanel { grid-area: chart; } #savePanel { grid-area: save; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  display: grid; gap: 12px;
+  min-width: 0;
+}
+.panel.drop { border-color: var(--accent); border-style: dashed; }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+h2 { margin: 0; font: 600 13px/1.2 var(--display); text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.pill {
+  font: 500 12px/1 var(--mono); padding: 6px 8px; border-radius: 99px;
+  border: 1px solid var(--line); color: var(--ink); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pill.warn { border-color: var(--accent); color: var(--accent); }
+.note { margin: 0; color: var(--muted); font-size: 13.5px; text-wrap: pretty; }
+.error { margin: 0; color: var(--accent); font-size: 13.5px; font-weight: 500; }
+
+.row { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 42px; padding: 0 14px; border-radius: 8px;
+  border: 1px solid var(--ink); background: transparent; color: var(--ink);
+  font-weight: 600; cursor: pointer; user-select: none;
+}
+.btn:hover { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.btn.primary { background: var(--ink); color: var(--surface); }
+.btn.primary:hover { background: color-mix(in srgb, var(--ink) 85%, var(--accent)); }
+.btn.wide { width: 100%; }
+.btn.rec { border-color: var(--accent); color: var(--accent); }
+.btn:disabled, .btn.disabled { opacity: 0.45; pointer-events: none; }
+
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.fields .full { grid-column: 1 / -1; }
+.field { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); font-weight: 500; }
+input[type="text"], select {
+  width: 100%; min-height: 40px; padding: 0 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--stage); color: var(--ink);
+  font: 500 15px var(--body);
+}
+input[type="text"] { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+input:disabled, select:disabled { opacity: 0.5; }
+
+.progress { display: grid; gap: 6px; }
+.bar { height: 6px; border-radius: 6px; background: var(--line); overflow: hidden; }
+.bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s; }
+.ptext { font: 500 12.5px var(--mono); color: var(--muted); }
+
+.keyrow { display: grid; grid-template-columns: minmax(0, 1.5fr) auto minmax(0, 1fr); gap: 10px; align-items: end; }
+.keyrow .arrow { font: 800 20px/40px var(--display); color: var(--muted); }
+.keypair { display: grid; grid-template-columns: minmax(0, 1fr) 76px; gap: 6px; }
+.shift { margin: 0; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.shift b { font: 800 22px/1.1 var(--display); letter-spacing: -0.01em; }
+.shift span { color: var(--muted); font-size: 13.5px; }
+
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; padding: 3px; gap: 3px; flex-wrap: wrap; }
+.seg button {
+  border: 0; background: transparent; padding: 7px 11px; border-radius: 6px;
+  font-weight: 500; font-size: 13.5px; color: var(--muted); cursor: pointer;
+}
+.seg button.on { background: var(--ink); color: var(--surface); }
+
+.chordnow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.chordnow .lbl { display: block; font: 600 11px/1 var(--display); text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 4px; }
+.chord-big { display: block; font: 800 clamp(34px, 7vw, 52px)/1 var(--display); letter-spacing: -0.02em; color: var(--accent); min-height: 1em; }
+.was { display: block; font: 500 13px var(--mono); color: var(--muted); margin-top: 6px; min-height: 1.4em; }
+.next { text-align: right; }
+.next span:last-child { font: 800 24px/1 var(--display); color: var(--ink); }
+
+.stage {
+  overflow-x: auto; overflow-y: hidden; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--stage); -webkit-overflow-scrolling: touch;
+}
+.stage canvas { display: block; }
+#roll { cursor: grab; touch-action: pan-x; }
+#roll:active { cursor: grabbing; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); align-items: center; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.legend .rh { background: var(--accent); } .legend .lh { background: var(--lh); }
+.live { font: 500 12.5px var(--mono); color: var(--ink); min-height: 1.5em; margin: 0; overflow-wrap: anywhere; }
+
+.transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.icon {
+  width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--line);
+  background: transparent; display: inline-grid; place-items: center; cursor: pointer; color: var(--ink);
+}
+.icon svg { width: 20px; height: 20px; fill: currentColor; }
+.icon.play { width: 56px; height: 56px; background: var(--accent); border-color: var(--accent); color: #fff; }
+.icon.play svg { width: 24px; height: 24px; }
+.icon.toggle.on { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.time { margin-left: auto; font: 600 14px var(--mono); font-variant-numeric: tabular-nums; }
+.controls { display: flex; gap: 14px 20px; flex-wrap: wrap; align-items: center; }
+.speed { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--muted); font-weight: 500; }
+.speed input { width: 150px; accent-color: var(--accent); }
+.speed output { font: 600 13px var(--mono); color: var(--ink); min-width: 4ch; }
+
+.chart { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+.chart button {
+  width: 100%; text-align: left; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--stage); padding: 8px 10px; cursor: pointer; display: grid; gap: 2px;
+}
+.chart button:hover { border-color: var(--ink); }
+.chart button.now { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.chart .ct { font: 500 11.5px var(--mono); color: var(--muted); }
+.chart .cn { font: 800 20px/1.15 var(--display); overflow-wrap: anywhere; }
+.chart .co { font: 500 12px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+
+footer { max-width: 1180px; margin: 0 auto; padding: 0 16px 28px; color: var(--muted); font-size: 12.5px; }
+footer p { margin: 0 0 4px; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { .bar span { transition: none; } }
+@media (max-width: 420px) {
+  .keyrow { grid-template-columns: 1fr; }
+  .keyrow .arrow { display: none; }
+  .time { margin-left: 0; width: 100%; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><i aria-hidden="true"></i>KeyShift</div>
+  <p class="tag">Hear and see a piano tutorial in the key you play it in.</p>
+</header>
+
+<main>
+  <section id="source" class="panel" aria-labelledby="h-source">
+    <div class="panel-head">
+      <h2 id="h-source">1 · Tutorial</h2>
+      <span id="sourceName" class="pill">Example: Eb gospel progression</span>
+    </div>
+    <div class="row">
+      <label id="fileLabel" class="btn primary" for="fileInput">Open audio or video</label>
+      <input type="file" id="fileInput" accept="audio/*,video/*,.mp3,.m4a,.wav,.mp4,.mov,.webm,.ogg,.flac" hidden>
+      <button id="recordBtn" class="btn" type="button" hidden>Record a tab</button>
+    </div>
+    <p id="sourceNote" class="note">Loaded: a short example in Eb, shown in Db. Open your own tutorial to replace it. On a phone, screen-record the YouTube video with sound on, then open the recording here.</p>
+    <div class="fields">
+      <label class="field">Start<input type="text" id="secStart" value="0:00" inputmode="numeric" autocomplete="off"></label>
+      <label class="field">End<input type="text" id="secEnd" value="0:12" inputmode="numeric" autocomplete="off"></label>
+      <label class="field full">Sensitivity
+        <select id="sens">
+          <option value="low">Low: skips talking and soft noise</option>
+          <option value="normal">Normal</option>
+          <option value="high">High: catches soft playing</option>
+        </select>
+      </label>
+    </div>
+    <button id="transcribeBtn" class="btn primary wide" type="button">Transcribe</button>
+    <div id="progress" class="progress" hidden>
+      <div class="bar"><span id="progressBar"></span></div>
+      <span id="progressText" class="ptext"></span>
+    </div>
+    <p id="sourceError" class="error" role="alert" hidden></p>
+  </section>
+
+  <section id="keyPanel" class="panel" aria-labelledby="h-key">
+    <div class="panel-head">
+      <h2 id="h-key">2 · Key</h2>
+      <span id="keyDetected" class="pill">Detected: Eb major</span>
+    </div>
+    <div class="keyrow">
+      <div class="field">Played in
+        <div class="keypair">
+          <select id="fromKey" aria-label="Original key"></select>
+          <select id="fromMode" aria-label="Major or minor"><option value="major">maj</option><option value="minor">min</option></select>
+        </div>
+      </div>
+      <span class="arrow" aria-hidden="true">→</span>
+      <label class="field">Change to<select id="toKey"></select></label>
+    </div>
+    <p id="keyHint" class="note" hidden>The key is a best guess. If the teacher names the key, set "Played in" to match.</p>
+    <p class="shift"><b id="shiftText">Down 2 semitones</b><span id="fromTo">Eb major to Db major</span></p>
+    <div class="seg" id="dirSeg" role="group" aria-label="Direction">
+      <button type="button" data-v="nearest">Nearest</button>
+      <button type="button" data-v="up">Up</button>
+      <button type="button" data-v="down">Down</button>
+    </div>
+  </section>
+
+  <section id="playerPanel" class="panel" aria-labelledby="h-player">
+    <h2 id="h-player" hidden>Player</h2>
+    <div class="chordnow">
+      <div>
+        <span class="lbl">Now</span>
+        <span id="chordNow" class="chord-big">·</span>
+        <span id="chordWas" class="was"></span>
+      </div>
+      <div class="next"><span class="lbl">Next</span><span id="chordNext">·</span></div>
+    </div>
+    <div class="stage" id="stage">
+      <canvas id="roll" aria-label="Falling notes. Drag up or down to move through the song."></canvas>
+      <canvas id="kbd" aria-hidden="true"></canvas>
+    </div>
+    <p id="kbdLive" class="live" aria-live="off"></p>
+    <div class="legend"><span><i class="rh"></i>Right hand</span><span><i class="lh"></i>Left hand (below middle C)</span><span>Drag the notes to scrub</span></div>
+    <div class="transport">
+      <button id="prevBtn" class="icon" type="button" aria-label="Previous chord"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+      <button id="playBtn" class="icon play" type="button" aria-label="Play">
+        <svg id="playIcon" viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg>
+        <svg id="pauseIcon" viewBox="0 0 24 24" hidden><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
+      </button>
+      <button id="nextBtn" class="icon" type="button" aria-label="Next chord"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+      <button id="loopBtn" class="icon toggle" type="button" aria-label="Loop this chord" aria-pressed="false" title="Loop this chord"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2z"/></svg></button>
+      <span id="time" class="time">0:00 / 0:00</span>
+    </div>
+    <div class="controls">
+      <label class="speed" for="speed">Speed <input type="range" id="speed" min="50" max="100" step="5" value="100"><output id="speedOut" for="speed">100%</output></label>
+      <div class="seg" id="hearSeg" role="group" aria-label="What to hear">
+        <button type="button" data-v="audio">Tutorial audio</button>
+        <button type="button" data-v="notes">Notes only</button>
+        <button type="button" data-v="both">Both</button>
+      </div>
+    </div>
+    <p id="modeNote" class="note" hidden></p>
+  </section>
+
+  <section id="chartPanel" class="panel" aria-labelledby="h-chart">
+    <div class="panel-head">
+      <h2 id="h-chart">3 · Chord chart</h2>
+      <span id="chartKey" class="pill">Db major</span>
+    </div>
+    <ol id="chart" class="chart"></ol>
+    <p id="chartEmpty" class="note" hidden>No chords yet.</p>
+    <p class="note">Big name: the new key. Small name: what the tutorial plays. Tap a chord to jump to it.</p>
+  </section>
+
+  <section id="savePanel" class="panel" aria-labelledby="h-save">
+    <div class="panel-head"><h2 id="h-save">4 · Save</h2></div>
+    <div class="row">
+      <button id="midiBtn" class="btn" type="button">MIDI file</button>
+      <button id="sheetBtn" class="btn" type="button">Chord sheet</button>
+    </div>
+    <p id="saveNote" class="note">Both are saved in the new key.</p>
+  </section>
+</main>
+
+<footer>
+  <p>Notes are written out by Spotify's Basic Pitch model, running on this device. Your files are not uploaded. <span id="engineInfo"></span></p>
+  <p>Keys: Space play or pause, Left and Right arrows move by chord, L loops the chord.</p>
+</footer>
+
+<script>/*__DATA__*/</script>
+<script>/*__APP__*/</script>
+</body>
+</html>
