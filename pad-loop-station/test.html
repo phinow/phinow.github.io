@@ -113,8 +113,10 @@ async function engineTests(sr) {
     ["Tempo changes and switching at the next bar", 40, [[0.1, (e) => { e.setTarget(96); e.play(A); }], [7.33, (e) => e.setTarget(105.6)], [15.1, (e) => e.queue(B, "bar")], [22.2, (e) => e.setTarget(88)], [28.7, (e) => e.queue(C, "bar")]]],
     ["Switching at the end of the loop, with a change of mind", 40, [[0.1, (e) => { e.setTarget(100); e.play(B); }], [3.05, (e) => e.queue(A, "loop")], [12.4, (e) => e.queue(C, "loop")], [13, (e) => e.queue(A, "loop")], [25.9, (e) => e.setTarget(130)]]],
     ["Switching straight away, and the tempo limits (50% and 200%)", 30, [[0.1, (e) => { e.setTarget(84); e.play(C); }], [4.321, (e) => e.queue(B, "now")], [9.876, (e) => e.queue(A, "now")], [15.5, (e) => e.setTarget(48)], [22.5, (e) => e.setTarget(200)]]],
+    ["Saved tempos: worship at 72, praise at 120, the old loop keeps its tempo until the switch", 34, [[0.1, (e) => { e.setTarget(72); e.play(A); }], [5.2, (e) => e.queue(B, "bar", 120)], [14.6, (e) => e.queue(C, "loop", 66)], [24.3, (e) => e.queue(A, "now", 72)], [30, (e) => e.queue(B, "bar", 120)], [30.4, (e) => e.queue(A, "bar", 72)]],
+      [[A, 72], [B, 120], [C, 66], [A, 72]]],
   ];
-  for (const [name, secs, acts] of runs) {
+  for (const [name, secs, acts, wantSegs] of runs) {
     const log = [];
     const x = await offline(sr, secs, acts.map(([at, fn]) => ({ at, fn })), (s) => log.push({ loop: s.loop, ratio: s.ratio, N: s.N, t0F: s.t0F, startF: s.startF }));
     const exp = [], xf = Math.round(0.01 * sr);
@@ -129,7 +131,8 @@ async function engineTests(sr) {
     let worst = 0, missing = 0; const used = new Set();
     for (const e of exp) { let best = null; for (const t of on) if (Math.abs(t - e.at) < 400 && (best === null || Math.abs(t - e.at) < Math.abs(best - e.at))) best = t; if (best === null) { missing++; continue; } used.add(best); if (!e.first) worst = Math.max(worst, Math.abs(best - e.at)); }
     const extra = on.filter((t) => !used.has(t)).length, ms = worst / sr * 1000;
-    line(!missing && !extra && ms < 0.2 ? "ok" : "bad", k + `${name}: ${exp.length} hits, ${missing} missing, ${extra} extra, furthest from the grid ${ms.toFixed(2)} ms.`);
+    const segsOk = !wantSegs || (log.length === wantSegs.length && wantSegs.every(([l, bpm], i) => log[i].loop === l && Math.abs(l.bpm * log[i].ratio - bpm) < 0.01));
+    line(!missing && !extra && ms < 0.2 && segsOk ? "ok" : "bad", k + `${name}: ${exp.length} hits, ${missing} missing, ${extra} extra, furthest from the grid ${ms.toFixed(2)} ms` + (wantSegs ? (segsOk ? ", each loop at its saved tempo with no early tempo change." : ", but the tempos were not as saved.") : "."));
     await pause();
   }
 }

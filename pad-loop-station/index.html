@@ -81,6 +81,8 @@ button { cursor: pointer; }
 .btn[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
 .tool { border: 1px solid var(--line); background: var(--panel); border-radius: 7px; padding: 5px 9px; font-size: 13px; color: var(--ink); }
 .tool:hover { border-color: var(--muted); }
+.tool[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); font-weight: 600; }
+.tool:disabled { opacity: 0.45; cursor: not-allowed; }
 .seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .seg button { border: 0; background: none; padding: 6px 11px; font-size: 13px; color: var(--muted); border-right: 1px solid var(--line); }
 .seg button:last-child { border-right: 0; }
@@ -244,6 +246,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); margin: 0; }
           <div class="tempo-actions">
             <button class="tool" id="tap">Tap tempo</button>
             <button class="tool" id="tempo-reset">Loop's own tempo</button>
+            <button class="tool" id="tempo-save" aria-pressed="false">Save tempo</button>
           </div>
         </div>
         <label class="sr" for="tempo">Tempo</label>

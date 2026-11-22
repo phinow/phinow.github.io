@@ -293,9 +293,20 @@ class LoopEngine {
     this.target = 96; this.ratio = 1; this.vol = 0.9;
     this._playing = false; this.timer = 0; this.prepTimer = 0;
     this.onError = null;
+    this.tempoFor = null;   // (loop) => the tempo saved for that loop's slot, or null
+    this.onTarget = null;   // called when a switch brings in a loop's saved tempo
   }
   get playing() { return this._playing; }
-  ratioFor(loop) { return clamp(this.target / loop.bpm, 0.5, 2); }
+  ratioFor(loop) { return this.ratioAt(loop, this.target); }
+  ratioAt(loop, bpm) { return clamp(bpm / loop.bpm, 0.5, 2); }
+  savedTempo(loop) { const t = this.tempoFor && this.tempoFor(loop); return t > 0 ? t : null; }
+  // Every tempo this loop may be asked to play at soon: now, its saved tempo, or the tempo it is queued at
+  wanted(loop, ratio) {
+    if (ratio === this.ratioFor(loop)) return true;
+    const t = this.savedTempo(loop); if (t && ratio === this.ratioAt(loop, t)) return true;
+    const p = this.pending; if (p && p.loop === loop && p.tempo && ratio === this.ratioAt(loop, p.tempo)) return true;
+    return this.segs.some((s) => s.loop === loop && s.ratio === ratio);
+  }
   applyRatio() { if (this.loop) this.ratio = this.ratioFor(this.loop); this.prepareSoon(); this.tick(); }
   setTarget(bpm) { this.target = bpm; this.applyRatio(); }
   setVolume(v) { this.vol = v; this.out.gain.setTargetAtTime(v * v, this.ctx.currentTime, 0.03); }
@@ -308,7 +319,7 @@ class LoopEngine {
     if (m.has(ratio)) return Promise.resolve(m.get(ratio));
     let jm = this.jobs.get(loop); if (!jm) { jm = new Map(); this.jobs.set(loop, jm); }
     if (jm.has(ratio)) return jm.get(ratio);
-    const stale = () => ratio !== this.ratioFor(loop) && !this.segs.some((s) => s.loop === loop && s.ratio === ratio);
+    const stale = () => !this.wanted(loop, ratio);
     const job = (ratio === 1 ? Promise.resolve({ L: loop.L, R: loop.R }) : this.render(loop.L, loop.R, this.sr, ratio, { urgent, stale }))
       .then(({ L, R }) => {
         const b = this.ctx.createBuffer(2, L.length, this.sr);
@@ -327,7 +338,11 @@ class LoopEngine {
     this.prepTimer = setTimeout(() => {
       const order = [this.loop, this.pending && this.pending.loop, ...this.known].filter(Boolean);
       const seen = new Set();
-      for (const l of order) { if (seen.has(l)) continue; seen.add(l); this.want(l, this.ratioFor(l), l === this.loop).catch(() => {}); }
+      for (const l of order) {
+        if (seen.has(l)) continue; seen.add(l);
+        const t = l === this.loop ? this.target : (this.pending && this.pending.loop === l && this.pending.tempo) || this.savedTempo(l) || this.target;
+        this.want(l, this.ratioAt(l, t), l === this.loop).catch(() => {});
+      }
     }, 150);
   }
 
@@ -359,12 +374,12 @@ class LoopEngine {
   }
   drop(s) { try { s.src.disconnect(); s.g.disconnect(); } catch (e) { /* gone */ } }
 
-  // mode: "bar" | "loop" | "now"
-  queue(loop, mode) {
+  // mode: "bar" | "loop" | "now". tempo: the BPM the new loop comes in at (the current tempo carries on until then)
+  queue(loop, mode, tempo) {
     if (!this._playing) { this.loop = loop; this.ratio = this.ratioFor(loop); this.prepareSoon(); return "selected"; }
     if (loop === this.loop) { this.pending = null; return "same"; }
-    this.pending = { loop, mode };
-    this.want(loop, this.ratioFor(loop), true).catch(() => {});
+    this.pending = { loop, mode, tempo: tempo > 0 ? tempo : null };
+    this.want(loop, this.ratioAt(loop, this.pending.tempo || this.target), true).catch(() => {});
     this.tick();
     return mode === "now" ? "now" : "queued";
   }
@@ -385,12 +400,13 @@ class LoopEngine {
     }
     if (cur.startF > nowF) return;   // a change is locked in and has not started yet
     if (this.pending) {
-      const p = this.pending, r = this.ratioFor(p.loop), b = this.bufferFor(p.loop, r);
+      const p = this.pending, r = this.ratioAt(p.loop, p.tempo || this.target), b = this.bufferFor(p.loop, r);
       if (!b) { this.want(p.loop, r, true).catch(() => {}); return; }   // still rendering; it will catch the next boundary
       const B = p.mode === "now" ? nowF + leadF : this.nextBoundary(cur, nowF + leadF, p.mode === "bar" ? cur.loop.bars : 1).at;
       if (B - nowF > commitF) return;
       this.switchTo(cur, p.loop, r, b, B);
       this.pending = null; this.loop = p.loop; this.ratio = r;
+      if (p.tempo && p.tempo !== this.target) { this.target = p.tempo; if (this.onTarget) this.onTarget(p.tempo); }
       return;
     }
     const r = this.ratioFor(cur.loop);

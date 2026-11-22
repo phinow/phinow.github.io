@@ -27,6 +27,8 @@ function audio() {
   pads.setSpace(S.pad.space); pads.setVolume(S.pad.vol);
   loops = new LoopEngine(ctx, master, makeStretcher());
   loops.onError = () => toast("Could not set that loop's tempo. Try a different tempo, or reload the app.");
+  loops.tempoFor = (loop) => { const sl = slotOfLoop(loop); return sl && sl.tempo > 0 ? sl.tempo : null; };
+  loops.onTarget = (t) => { S.target = t; saveSettings(); renderTempo(); };   // a switch brought in that slot's saved tempo
   loops.setTarget(S.target); loops.setVolume(S.loopVol);
   if (ctx.addEventListener) ctx.addEventListener("statechange", updatePill);
   return ctx;
@@ -310,11 +312,27 @@ function select(slotId, quiet) {
   const loop = loopOf(slot);
   if (!loop) { pickFileFor(slot.id); return; }
   S.selected = slot.id; saveSettings();
+  const t = slot.tempo > 0 ? slot.tempo : null;   // the tempo saved for this slot, if any
   if (loops && loops.playing) {
-    const r = loops.queue(loop, S.mode);
-    if (r === "queued" && !quiet) toast(S.mode === "bar" ? `${slot.label}: starts at the next bar` : `${slot.label}: starts at the end of this loop`);
-  } else if (loops) { loops.loop = loop; loops.applyRatio(); }
+    // The loop playing now keeps its tempo; the new one comes in at its saved tempo when it starts
+    const r = loops.queue(loop, S.mode, t);
+    if (r === "same" && t && t !== S.target) setTarget(t);
+    else if (r === "queued" && !quiet) toast(`${slot.label}: starts ${S.mode === "bar" ? "at the next bar" : "at the end of this loop"}${t && t !== S.target ? ` at ${fmt(t)} BPM` : ""}`);
+  } else {
+    if (t) setTarget(t);
+    if (loops) { loops.loop = loop; loops.applyRatio(); }
+  }
   renderSlots(); renderTempo();
+}
+
+// A slot's saved tempo: whenever that slot is picked, the tempo goes to it. null clears it.
+function setSlotTempo(slot, v) {
+  if (v === null || !(v >= 40 && v <= 200)) { delete slot.tempo; v = null; }
+  else slot.tempo = Math.round(v * 10) / 10;
+  saveSettings();
+  if (v !== null && slot.id === S.selected) setTarget(slot.tempo);
+  renderSlots(); renderTempo();
+  return v !== null;
 }
 
 function clearSlot(slotId) {
@@ -400,9 +418,10 @@ function slotCard(slot, num, heard) {
   if (loop) {
     const queued = loops && loops.pending && loops.pending.loop === loop ? " · up next" : "";
     main.querySelector(".slot-file").textContent = loop.name;
-    main.querySelector(".slot-meta").textContent = `${fmt(loop.bpm)} BPM · ${loop.bars} bar${loop.bars > 1 ? "s" : ""} of ${loop.bpb}/4${queued}`;
-    main.title = `${loop.name}: ${loop.dur.toFixed(1)} s, tempo ${loop.how}`;
-    main.setAttribute("aria-label", `${slot.label}: ${loop.name}, ${fmt(loop.bpm)} BPM`);
+    const tempo = slot.tempo > 0 ? `Plays at ${fmt(slot.tempo)} BPM` : `${fmt(loop.bpm)} BPM`;
+    main.querySelector(".slot-meta").textContent = `${tempo} · ${loop.bars} bar${loop.bars > 1 ? "s" : ""} of ${loop.bpb}/4${queued}`;
+    main.title = `${loop.name}: ${loop.dur.toFixed(1)} s, own tempo ${fmt(loop.bpm)} BPM (${loop.how})` + (slot.tempo > 0 ? `, plays at ${fmt(slot.tempo)} BPM` : "");
+    main.setAttribute("aria-label", `${slot.label}: ${loop.name}, ` + (slot.tempo > 0 ? `plays at ${fmt(slot.tempo)} BPM` : `${fmt(loop.bpm)} BPM`));
   } else {
     main.querySelector(".slot-file").textContent = "Empty";
     main.querySelector(".slot-meta").textContent = "Drop a file, or tap";
@@ -454,7 +473,19 @@ function openMenu(li, slot, btn) {
     inp.addEventListener("change", () => setLoopBpm(loop, parseFloat(inp.value)));
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") inp.blur(); });
     field.append(document.createTextNode("Own tempo"), inp);
+    field.title = "The tempo the file was recorded at";
     m.append(field);
+    const pf = document.createElement("label");
+    pf.className = "bpm-field";
+    pf.title = "The tempo this slot plays at whenever you pick it. Leave it empty to keep the tempo you have set.";
+    const pin = document.createElement("input");
+    pin.type = "number"; pin.step = "0.5"; pin.min = "40"; pin.max = "200"; pin.placeholder = "Any";
+    pin.value = slot.tempo > 0 ? fmt(slot.tempo) : "";
+    pin.id = "play-at-" + slot.id;
+    pin.addEventListener("change", () => setSlotTempo(slot, pin.value.trim() === "" ? null : parseFloat(pin.value)));
+    pin.addEventListener("keydown", (e) => { if (e.key === "Enter") pin.blur(); });
+    pf.append(document.createTextNode("Play at"), pin);
+    m.append(pf);
     m.append(toolBtn("Check loop", `Check how ${slot.label} repeats`, () => { closeMenu(); reportLoop(slot, loop); }));
     m.append(toolBtn("Trim", `Trim ${slot.label}`, () => { closeMenu(); trimSlot(slot); }));
     m.append(toolBtn("Replace file", `Replace the file in ${slot.label}`, () => { closeMenu(); pickFileFor(slot.id); }));
@@ -683,6 +714,24 @@ function renderTempo() {
     note.textContent = `Loop's own tempo ${fmt(loop.bpm)} BPM · playing at ${pct}% speed` + (Math.abs(pct - 100) > 25 ? " (sounds best within about 20%)" : "");
     note.classList.toggle("warn", Math.abs(pct - 100) > 25);
   }
+  renderSaveTempo();
+}
+
+// "Save tempo" keeps the current tempo on the selected slot; pressing it again when it matches clears it
+function renderSaveTempo() {
+  const b = $("#tempo-save"), slot = slotById(S.selected), ok = !!(slot && loopOf(slot));
+  const waiting = ok && loops && loops.pending && loops.pending.loop === loopOf(slot);   // switch not landed yet
+  const saved = ok && slot.tempo > 0 ? slot.tempo : null, same = saved !== null && Math.abs(saved - (waiting && loops.pending.tempo || S.target)) < 0.05;
+  b.disabled = !ok || waiting;
+  b.textContent = same ? "Tempo saved" : "Save tempo";
+  b.setAttribute("aria-pressed", String(same));
+  b.title = !ok ? "Pick a loop first" : waiting ? `Waiting for ${slot.label} to start` : same ? `${slot.label} plays at ${fmt(saved)} BPM whenever you pick it. Press to stop saving it.` : `Make ${slot.label} play at ${fmt(S.target)} BPM whenever you pick it` + (saved ? ` (now ${fmt(saved)})` : "");
+}
+function saveTempo() {
+  const slot = slotById(S.selected);
+  if (!slot || !loopOf(slot)) return;
+  if (slot.tempo > 0 && Math.abs(slot.tempo - S.target) < 0.05) { setSlotTempo(slot, null); toast(`${slot.label} no longer has its own tempo. It keeps whatever tempo is set.`); }
+  else { setSlotTempo(slot, S.target); toast(`${slot.label} will play at ${fmt(S.target)} BPM whenever you pick it, even mid-song.`); }
 }
 
 let taps = [];
@@ -814,6 +863,7 @@ async function init() {
   $("#tempo-down").addEventListener("click", () => setTarget(Math.round(S.target) - 1));
   $("#tempo-up").addEventListener("click", () => setTarget(Math.round(S.target) + 1));
   $("#tap").addEventListener("click", tap);
+  $("#tempo-save").addEventListener("click", saveTempo);
   $("#tempo-reset").addEventListener("click", () => {
     const loop = (loops && loops.loop) || loopOf(slotById(S.selected));
     if (loop) setTarget(loop.bpm);
