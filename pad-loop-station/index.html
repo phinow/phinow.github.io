@@ -180,6 +180,10 @@ input[type="range"] { width: 100%; accent-color: var(--ink); margin: 0; }
 .trim-start { display: flex; align-items: center; gap: 6px; }
 .trim-start output { min-width: 74px; text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; }
 .trim-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+.backup-box { width: min(580px, 100%); }
+.trim-box p.backup-status { color: var(--ink); font-weight: 500; }
+.btn.due::after { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ink); margin-left: 7px; vertical-align: 1px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* Small or short screens: let the page scroll instead of squeezing */
 @media (max-width: 900px), (max-height: 600px) {
@@ -210,6 +214,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); margin: 0; }
       <input type="range" id="master" min="0" max="1" step="0.01">
       <output id="master-out" for="master"></output>
     </div>
+    <button class="btn" id="backup-btn">Backup</button>
     <button class="btn" id="invert" aria-pressed="false">Invert colours</button>
     <button class="btn strong" id="install" hidden>Install app</button>
     <span class="pill" id="audio-pill">Sound starts on your first tap</span>
@@ -343,6 +348,24 @@ input[type="range"] { width: 100%; accent-color: var(--ink); margin: 0; }
       <button class="btn" id="trim-cancel">Cancel</button>
       <button class="btn strong" id="trim-save">Use this loop</button>
     </div>
+  </div>
+</div>
+<div class="trimmer" id="backup" hidden role="dialog" aria-modal="true" aria-labelledby="backup-title">
+  <div class="trim-box backup-box">
+    <h2 id="backup-title">Backup</h2>
+    <p id="backup-text"></p>
+    <p id="backup-status" class="backup-status"></p>
+    <div class="trim-actions" id="backup-main">
+      <button class="btn" id="backup-close">Close</button>
+      <button class="btn" id="backup-import">Import backup</button>
+      <button class="btn strong" id="backup-export">Export backup</button>
+    </div>
+    <div class="trim-actions" id="backup-confirm" hidden>
+      <button class="btn" id="backup-cancel">Cancel</button>
+      <button class="btn" id="backup-export-first">Export this computer's loops first</button>
+      <button class="btn strong" id="backup-restore">Replace with backup</button>
+    </div>
+    <input type="file" id="backup-file" accept=".loopadicious" class="sr" tabindex="-1" aria-hidden="true">
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>

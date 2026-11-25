@@ -10,7 +10,8 @@ try {
   const raw = localStorage.getItem(SETTINGS_KEY);
   if (raw) { const saved = JSON.parse(raw); S = { ...S, ...saved, pad: { ...S.pad, ...(saved.pad || {}) } }; }
 } catch (e) { /* storage not available */ }
-function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } }
+let settingsLocked = false;   // set while a backup is being restored, so nothing overwrites it before the reload
+function saveSettings() { if (settingsLocked) return; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } }
 
 /* ----- Audio graph ----- */
 let ctx = null, master = null, pads = null, loops = null;
@@ -233,6 +234,8 @@ async function addFiles(files, slotId) {
   audio();
   if (ctx.state !== "running") ctx.resume().catch(() => {});   // never wait on this: decoding works with sound still off
   const all = [...files].filter((f) => f && !f.name.startsWith("."));
+  const bk = all.find((f) => /\.loopadicious$/i.test(f.name));
+  if (bk) { importBackupFile(bk); return; }
   const list = all.filter((f) => /^audio\//.test(f.type) || AUDIO_EXT.test(f.name));
   if (!list.length) {
     toast(all.length ? "Those aren't audio files. Use MP3, WAV, M4A or AIFF." : "Nothing came through. Drag the files from Finder, or use Add loop files.");
@@ -289,6 +292,7 @@ function placeLoop(slot, loop, rec) {
   }
   if (!loopOf(slotById(S.selected))) S.selected = slot.id;
   if (S.selected === slot.id && loops && !loops.playing) { loops.loop = loop; loops.applyRatio(); }
+  S.changedAt = Date.now();
   saveSettings();
 }
 
@@ -329,7 +333,7 @@ function select(slotId, quiet) {
 function setSlotTempo(slot, v) {
   if (v === null || !(v >= 40 && v <= 200)) { delete slot.tempo; v = null; }
   else slot.tempo = Math.round(v * 10) / 10;
-  saveSettings();
+  S.changedAt = Date.now(); saveSettings();
   if (v !== null && slot.id === S.selected) setTarget(slot.tempo);
   renderSlots(); renderTempo();
   return v !== null;
@@ -341,7 +345,7 @@ function clearSlot(slotId) {
   if (!loop) {   // an empty slot: remove the slot itself
     S.slots = S.slots.filter((s) => s !== slot);
     if (S.selected === slot.id) S.selected = (orderedSlots().find((s) => s.loopId) || {}).id || null;
-    saveSettings(); renderSlots(); return;
+    S.changedAt = Date.now(); saveSettings(); renderSlots(); return;
   }
   const heard = loops && loops.heardState();
   if (loops && loops.playing && (loops.loop === loop || (heard && heard.loop === loop))) togglePlay(false);
@@ -354,12 +358,13 @@ function clearSlot(slotId) {
     if (next) S.selected = next.id;
   }
   if (loops && !loops.playing) loops.loop = loopOf(slotById(S.selected));
-  saveSettings(); renderSlots(); renderTempo();
+  S.changedAt = Date.now(); saveSettings(); renderSlots(); renderTempo();
 }
 
 function setLoopBpm(loop, v) {
   if (!loop || !(v >= 30 && v <= 300)) { renderSlots(); return; }
   loop.bpm = v; loop.how = "set by you"; loopMeta(loop);
+  S.changedAt = Date.now(); saveSettings();
   if (DB.db) {
     DB.tx("readwrite", (s) => {
       const r = s.get(loop.id);
@@ -397,6 +402,7 @@ function renderSlots() {
     wrap.append(row);
   }
   $("#play").disabled = !lib.length;
+  renderBackupBtn();
   const head = $("#add-slot-wrap");
   if (head && !head.querySelector("form")) { head.textContent = ""; head.append(addSlotButton(GROUPS[2])); }
 }
@@ -548,7 +554,7 @@ function renameSlot(li, slot) {
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const v = inp.value.trim();
-    if (v) { slot.label = v; if (!loopOf(slot)) slot.bpb = bpbFromLabel(v); saveSettings(); }
+    if (v) { slot.label = v; if (!loopOf(slot)) slot.bpb = bpbFromLabel(v); S.changedAt = Date.now(); saveSettings(); }
     renderSlots();
   });
   inp.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); renderSlots(); } });
@@ -844,6 +850,143 @@ function bindSlider(id, get, set, show) {
 }
 
 /* ----- Start up ----- */
+/* ----- Backup: every loop and setting in one file, to keep safe or to set up another computer ----- */
+// File layout: 16-byte tag, 4-byte header length, JSON header (settings and each loop's details), then each loop file's bytes.
+const BK_MAGIC = "LOOPADICIOUS-BK1", BK_DONE = "loopadicious:restored";
+let bkPending = null;
+const dayTime = (t) => new Date(t).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
+const sizeText = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+async function sha256(buf) {
+  if (!(window.crypto && crypto.subtle)) return null;
+  const d = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+  return [...d].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function backupDue() { return lib.length > 0 && (!S.lastBackup || (S.changedAt || 0) > S.lastBackup); }
+function renderBackupBtn() {
+  const b = $("#backup-btn"), due = backupDue();
+  b.classList.toggle("due", due);
+  b.title = due ? (S.lastBackup ? "Your loops or slots have changed since the last backup" : "Not backed up yet") : "Save or restore all your loops and settings";
+}
+function openBackup() {
+  bkPending = null;
+  $("#backup-title").textContent = "Backup";
+  $("#backup-text").textContent = "Save every loop and setting in one file. Keep it on a USB stick or in a cloud folder. To set up another computer, open Loopadicious there, press Backup, then Import backup.";
+  $("#backup-status").textContent = `On this computer: ${plural(lib.length, "loop")}. ` + (S.lastBackup ? `Last backup: ${dayTime(S.lastBackup)}` + (backupDue() ? ", and things have changed since." : ".") : "Not backed up yet.");
+  $("#backup-main").hidden = false; $("#backup-confirm").hidden = true;
+  $("#backup-export").disabled = !lib.length;
+  $("#backup").hidden = false;
+  $(lib.length ? "#backup-export" : "#backup-import").focus();
+}
+function closeBackup() { $("#backup").hidden = true; bkPending = null; }
+
+async function exportBackup() {
+  const name = `Loopadicious backup ${new Date().toISOString().slice(0, 10)}.loopadicious`;
+  let handle = null;
+  if (window.showSaveFilePicker) {   // lets you pick the folder, such as a USB stick
+    try { handle = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: "Loopadicious backup", accept: { "application/octet-stream": [".loopadicious"] } }] }); }
+    catch (e) { if (e && e.name === "AbortError") return false; handle = null; }
+  }
+  toast("Making the backup…", 60000);
+  try {
+    const recs = (await DB.all()) || [], enc = new TextEncoder(), parts = [], list = [];
+    let offset = 0;
+    for (const r of recs) {
+      const data = r.data instanceof Blob ? await r.data.arrayBuffer() : r.data;
+      if (!data || !data.byteLength) continue;
+      const meta = { ...r }; delete meta.data;
+      list.push({ rec: meta, offset, length: data.byteLength, sha256: await sha256(data) });
+      parts.push(data); offset += data.byteLength;
+    }
+    const settings = JSON.parse(JSON.stringify(S)); delete settings.lastBackup;
+    const head = enc.encode(JSON.stringify({ format: "loopadicious-backup", version: 1, exported: new Date().toISOString(), settings, loops: list }));
+    const pre = new Uint8Array(20); pre.set(enc.encode(BK_MAGIC)); new DataView(pre.buffer).setUint32(16, head.length, true);
+    const blob = new Blob([pre, head, ...parts], { type: "application/octet-stream" });
+    if (handle) { const w = await handle.createWritable(); await w.write(blob); await w.close(); }
+    else {
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 120000);
+    }
+    S.lastBackup = Date.now(); saveSettings(); renderBackupBtn();
+    toast(`Backup saved: ${plural(list.length, "loop")} and your settings (${sizeText(blob.size)})${handle ? "" : ", in your Downloads folder"}. Keep it somewhere safe.`, 9000);
+    return true;
+  } catch (e) {
+    toast("The backup could not be saved. Nothing was changed. Try again, or pick a different folder.", 9000);
+    return false;
+  }
+}
+
+// Reads and checks the whole file before anything on this computer is touched
+async function readBackup(file) {
+  const fail = (why) => { throw new Error(why); };
+  const buf = await file.arrayBuffer();
+  if (buf.byteLength < 20 || new TextDecoder().decode(new Uint8Array(buf, 0, 16)) !== BK_MAGIC) fail("That file is not a Loopadicious backup.");
+  const hl = new DataView(buf).getUint32(16, true);
+  let h = null;
+  try { h = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, Math.min(hl, buf.byteLength - 20)))); } catch (e) { h = null; }
+  if (!h || h.format !== "loopadicious-backup" || !Array.isArray(h.loops) || !h.settings || typeof h.settings !== "object") fail("That backup file is damaged, so nothing was changed.");
+  if (h.version > 1) fail("That backup was made by a newer Loopadicious. Close and reopen the app to update it, then try again.");
+  const base = 20 + hl, recs = [];
+  for (const l of h.loops) {
+    if (!l || !l.rec || typeof l.rec.id !== "string" || !(l.offset >= 0) || !(l.length > 0) || base + l.offset + l.length > buf.byteLength) fail("That backup file is damaged or incomplete, so nothing was changed.");
+    const data = buf.slice(base + l.offset, base + l.offset + l.length);
+    if (l.sha256) { const got = await sha256(data); if (got && got !== l.sha256) fail("That backup file is damaged (a loop does not match what was saved), so nothing was changed."); }
+    recs.push({ ...l.rec, data });
+  }
+  return { header: h, recs };
+}
+async function importBackupFile(file) {
+  openBackup();
+  $("#backup-status").textContent = "Checking the backup…";
+  let bk;
+  try { bk = await readBackup(file); } catch (e) { openBackup(); toast(e.message || "That file could not be read, so nothing was changed.", 9000); return; }
+  bkPending = bk;
+  const names = bk.recs.map((r) => String(r.name || "").replace(/\.[^.]+$/, "")), set = bk.header.settings;
+  $("#backup-title").textContent = "Restore backup?";
+  $("#backup-text").textContent = `Backup from ${dayTime(bk.header.exported)}: ${plural(bk.recs.length, "loop")}` +
+    (names.length ? ` (${names.slice(0, 6).join(", ")}${names.length > 6 ? ", and more" : ""})` : "") +
+    (set.target ? `, tempo ${fmt(set.target)} BPM` : "") + ", with its slots and settings.";
+  $("#backup-status").textContent = lib.length ? `This replaces the ${plural(lib.length, "loop")} and the settings on this computer. To keep them, export them first.` : "This computer has no loops yet, so nothing here is lost.";
+  const first = $("#backup-export-first");
+  first.hidden = !lib.length; first.disabled = false; first.textContent = "Export this computer's loops first";
+  $("#backup-main").hidden = true; $("#backup-confirm").hidden = false;
+  $("#backup-restore").focus();
+}
+async function restoreBackup() {
+  const bk = bkPending;
+  if (!bk) return;
+  if (!DB.db) { toast("This browser cannot store loops, so the backup cannot be restored here.", 9000); return; }
+  const btn = $("#backup-restore"); btn.disabled = true;
+  togglePlay(false); if (pads) stopPad();
+  // One step: if anything fails, the loops on this computer stay exactly as they were
+  const ok = await new Promise((res) => {
+    try {
+      const t = DB.db.transaction("loops", "readwrite"), st = t.objectStore("loops");
+      st.clear(); for (const r of bk.recs) st.put(r);
+      t.oncomplete = () => res(true); t.onerror = () => res(false); t.onabort = () => res(false);
+    } catch (e) { res(false); }
+  });
+  btn.disabled = false;
+  if (!ok) { toast("The backup could not be restored. Nothing on this computer was changed.", 9000); return; }
+  settingsLocked = true;
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...bk.header.settings, lastBackup: Date.parse(bk.header.exported) || Date.now() }));
+    sessionStorage.setItem(BK_DONE, String(bk.recs.length));
+  } catch (e) { /* the loops are restored either way */ }
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  location.reload();
+}
+$("#backup-btn").addEventListener("click", openBackup);
+$("#backup-close").addEventListener("click", closeBackup);
+$("#backup-cancel").addEventListener("click", closeBackup);
+$("#backup-export").addEventListener("click", async () => { if (await exportBackup() && !$("#backup").hidden && !bkPending) openBackup(); });
+$("#backup-import").addEventListener("click", () => $("#backup-file").click());
+$("#backup-file").addEventListener("change", (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) importBackupFile(f); });
+$("#backup-export-first").addEventListener("click", async (e) => { const b = e.currentTarget; if (await exportBackup()) { b.textContent = "Exported"; b.disabled = true; } });
+$("#backup-restore").addEventListener("click", restoreBackup);
+$("#backup").addEventListener("click", (e) => { if (e.target.id === "backup") closeBackup(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#backup").hidden) { e.stopPropagation(); closeBackup(); } }, true);
+
 async function init() {
   applyTheme();
   renderPadControls();
@@ -890,7 +1033,7 @@ async function init() {
   });
   document.addEventListener("keydown", (e) => {
     const tag = (e.target.tagName || "").toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select" || !$("#trimmer").hidden) return;
+    if (tag === "input" || tag === "textarea" || tag === "select" || !$("#trimmer").hidden || !$("#backup").hidden) return;
     if (e.code === "Space") { e.preventDefault(); if (!e.repeat && lib.length) togglePlay(); }
     if (e.key === "Escape") stopPad();
     if (/^[1-9]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
@@ -931,6 +1074,10 @@ async function init() {
   if (loops) { loops.loop = loopOf(slotById(S.selected)); loops.applyRatio(); }
   renderSlots();
   renderTempo();
+  try {
+    const n = sessionStorage.getItem(BK_DONE);
+    if (n !== null) { sessionStorage.removeItem(BK_DONE); toast(`Backup restored: ${plural(Number(n), "loop")} and your settings.`, 7000); }
+  } catch (e) { /* no session storage */ }
 }
 init();
 
