@@ -110,6 +110,11 @@ async function evaluate(model, audio, batch, onWindow, shouldStop) {
   return { frames, onsets };
 }
 
+// For testing and tuning: the raw model output.
+export async function evaluateRaw(model, audio22k, batch = 2) {
+  return evaluate(model, audio22k, batch);
+}
+
 // audio22k: mono Float32Array at 22050 Hz (keep it to a minute or less per call).
 // Returns notes [{t, d, p, a}] with times relative to the start of audio22k.
 // Returns null if shouldStop() turned true part way.
@@ -120,7 +125,8 @@ export async function transcribe(model, audio22k, sensitivity, onProgress, shoul
   if (!frames.length) return [];
   const cfg = SENSITIVITY[sensitivity] || SENSITIVITY.normal;
   // Piano range only: A0 (27.5 Hz) to C8 (4186 Hz).
-  const events = outputToNotesPoly(frames, onsets, cfg.onset, cfg.frame, cfg.minLen, true, 4200, 27, true, 11);
+  // Melodia trick off: on piano tests it added more wrong notes than it found (F1 0.80 -> 0.82).
+  const events = outputToNotesPoly(frames, onsets, cfg.onset, cfg.frame, cfg.minLen, true, 4200, 27, false, 11);
   return noteFramesToTime(events)
     .map(n => ({ t: n.startTimeSeconds, d: n.durationSeconds, p: n.pitchMidi, a: n.amplitude }))
     .filter(n => n.p >= 21 && n.p <= 108)

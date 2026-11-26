@@ -5,9 +5,11 @@
 // survives minification untouched.
 const SignalsmithStretch = (...args) => window.SignalsmithStretch(...args);
 import { resampleMono } from './media.js';
+import { PianoSampler } from './sampler.js';
 
 export class Player {
-  constructor() {
+  constructor(assetBase) {
+    this.assetBase = assetBase;
     this.ctx = null;
     this.audio = null;      // mono Float32Array of the part being studied
     this.sampleRate = 48000;
@@ -43,8 +45,10 @@ export class Player {
     this.audioGain = this.ctx.createGain();
     this.audioGain.connect(this.master);
     this.notesGain = this.ctx.createGain();
-    this.notesGain.gain.value = 0.32;
+    this.notesGain.gain.value = 0.9;
     this.notesGain.connect(this.master);
+    this.sampler = new PianoSampler(this.ctx, this.notesGain, this.assetBase);
+    this.sampler.load().catch(e => console.warn('Piano samples could not load; using a simple tone', e));
     this.applyMix();
     try {
       this.stretch = await Promise.race([
@@ -119,7 +123,7 @@ export class Player {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
     this.audioGain.gain.setTargetAtTime(this.hearAudio ? 1 : 0, t, 0.02);
-    this.notesGain.gain.setTargetAtTime(this.hearNotes ? 0.32 : 0, t, 0.02);
+    this.notesGain.gain.setTargetAtTime(this.hearNotes ? 0.9 : 0, t, 0.02);
   }
 
   setMix(audio, notes) {
@@ -144,7 +148,9 @@ export class Player {
     if (this.mode === 'stretch') {
       this.stretch.schedule({
         active: true, output: now, input: pos, rate: this.speed, semitones: this.semis,
-        formantCompensation: true, formantBaseHz: 0,
+        // Formant correction is meant for voices; on piano it smears the sound (measured: about
+        // three times more noise between the harmonics), so it stays off.
+        formantCompensation: false,
       });
     } else {
       const src = this.ctx.createBufferSource();
@@ -244,8 +250,8 @@ export class Player {
       try {
         v.g.gain.cancelScheduledValues(t);
         v.g.gain.setTargetAtTime(0, t, 0.01);
-        v.o1.stop(t + 0.08);
-        v.o2.stop(t + 0.08);
+        if (v.src) v.src.stop(t + 0.08);
+        else { v.o1.stop(t + 0.08); v.o2.stop(t + 0.08); }
       } catch (e) { /* voice already ended */ }
     }
     this.voices.clear();
@@ -269,6 +275,11 @@ export class Player {
   }
 
   voice(midi, when, dur, amp) {
+    if (this.sampler && this.sampler.ready) {
+      const v = this.sampler.play(midi, when, dur, amp);
+      if (v) { this.voices.add(v); v.onEnd = () => this.voices.delete(v); }
+      return;
+    }
     const ctx = this.ctx;
     const f = 440 * Math.pow(2, (midi - 69) / 12);
     const o1 = ctx.createOscillator();

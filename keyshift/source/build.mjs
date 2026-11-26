@@ -23,6 +23,7 @@ const data = `var MODEL_JSON=${JSON.stringify(modelJSON)};var MODEL_B64="${weigh
 let html = fs.readFileSync('src/template.html', 'utf8');
 html = html.replace('<script>/*__DATA__*/</script>', () => `<script>${safe(data)}</script>\n<script>${safe(stretch)}</script>`);
 html = html.replace('<script>/*__APP__*/</script>', () => `<script>${safe(app)}</script>`);
-
+// The page's other files (ort/, models/, piano/, demo.mp3, coi-serviceworker.min.js) live next to
+// index.html in the keyshift folder and are not touched by the build.
 fs.writeFileSync('../index.html', html);
 console.log('app', (app.length / 1024).toFixed(0) + 'KB', 'total', (html.length / 1024 / 1024).toFixed(2) + 'MB');

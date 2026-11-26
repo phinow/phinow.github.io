@@ -4,6 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KeyShift Tutorial Transposer</title>
+<script>
+/* On a normal website, a small service worker turns on cross-origin isolation so the piano model
+   can use several processor threads. Skipped inside Claude, where service workers are not allowed. */
+(function () {
+  try {
+    if (window.top !== window || window.crossOriginIsolated || !window.isSecureContext || !("serviceWorker" in navigator)) return;
+    window.coi = { coepCredentialless: function () { return false; }, quiet: true };
+    var s = document.createElement("script");
+    s.src = "coi-serviceworker.min.js";
+    document.head.appendChild(s);
+  } catch (e) { /* not available here */ }
+})();
+</script>
 <style>
 :root {
   /* Layout: a narrow control column beside the player on wide screens; one stacked column on phones.
@@ -320,10 +333,16 @@ footer{max-width:1320px;padding:0 clamp(18px,3vw,44px) 28px;font-size:12px;line-
       <input type="file" id="fileInput" accept="audio/*,video/*,.mp3,.m4a,.wav,.mp4,.mov,.webm,.ogg,.flac" hidden>
       <button id="recordBtn" class="btn" type="button" hidden>Record a tab</button>
     </div>
-    <p id="sourceNote" class="note">Loaded: a short example in Eb, shown in Db. Open your own tutorial to replace it. Long videos are fine: the notes appear half a minute at a time, and you can play what is ready. On a phone, screen-record the YouTube video with sound on, then open the recording here.</p>
+    <p id="sourceNote" class="note">Loaded: a short piano example in Eb, shown in Db. Open your own tutorial to replace it. Long videos are fine: the notes appear half a minute at a time, and you can play what is ready. On a phone, screen-record the YouTube video with sound on, then open the recording here.</p>
     <div class="fields">
       <label class="field">Start<input type="text" id="secStart" value="0:00" inputmode="numeric" autocomplete="off"></label>
       <label class="field">End<input type="text" id="secEnd" value="0:12" inputmode="numeric" autocomplete="off"></label>
+      <label class="field full">Accuracy
+        <select id="engine">
+          <option value="piano">Best: piano model (slower)</option>
+          <option value="quick">Quick: rough notes, any instrument</option>
+        </select>
+      </label>
       <label class="field full">Sensitivity
         <select id="sens">
           <option value="low">Low: skips talking and soft noise</option>
@@ -422,7 +441,8 @@ footer{max-width:1320px;padding:0 clamp(18px,3vw,44px) 28px;font-size:12px;line-
 </main>
 
 <footer>
-  <p>Notes are written out by Spotify's Basic Pitch model, running on this device. Your files are not uploaded. <span id="engineInfo"></span></p>
+  <p>Notes are written out on this device; your files are not uploaded. <span id="engineInfo"></span></p>
+  <p>Piano model: Sony's hFT-Transformer (MIT licence), trained on the MAESTRO recordings (CC BY-NC-SA 4.0). Quick model: Spotify's Basic Pitch. Piano sound: Salamander Grand Piano by Alexander Holm (CC BY 3.0).</p>
   <p>Keys: Space play or pause, Left and Right arrows move by chord, L loops the chord.</p>
 </footer>
 

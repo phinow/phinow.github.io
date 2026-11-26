@@ -1,17 +1,19 @@
 import { loadModel, transcribe, backendName, MODEL_RATE } from './engine.js';
+import { HFT, blockInput, extractNotes, frameCount, HFT_SENSITIVITY } from './hft.js';
+import { loadHftEngine, runBlock, engineInfo } from './hftEngine.js';
 import { openMedia, resampleMono } from './media.js';
 import { Player } from './player.js';
 import {
   KEY_CHOICES, detectKey, detectChords, chordName, noteNamer, midiName, defaultKeyId, keyLabel,
-  shiftBetween, cleanNotes,
+  shiftBetween,
 } from './theory.js';
-import { renderDemo } from './demo.js';
 import { buildMidi, saveFile, insideClaude } from './files.js';
 
 /* global MODEL_JSON, MODEL_B64, DEMO_NOTES */
 
 const $ = id => document.getElementById(id);
-const player = new Player();
+const ASSET_BASE = new URL('./', location.href).href;
+const player = new Player(ASSET_BASE);
 
 const S = {
   sourceName: 'Example: Eb gospel progression',
@@ -604,8 +606,9 @@ async function loadMedia(file, name) {
   }
 }
 
-const CHUNK = 30;   // seconds of audio per model pass
+const CHUNK = 30;   // seconds of audio per pass of the quick model
 const CONTEXT = 1;  // extra second either side so notes at the edges are not cut
+const HFT_CHUNK_BLOCKS = 8; // piano model: refresh notes and chords every 8 blocks (about 16 s)
 
 async function runTranscribe() {
   if (S.running) { S.stopAsked = true; $('transcribeBtn').textContent = 'Stopping…'; return; }
@@ -627,54 +630,36 @@ async function runTranscribe() {
   const sr = S.sr;
   const section = S.mono.subarray(Math.floor(a * sr), Math.floor(b * sr));
   const dur = section.length / sr;
-  let notes = [];
+  const notes = [];
+  const ctx = { a, b, dur, t0: 0, done: 0 };
   try {
-    setProgress(0.01, 'Loading the note model…');
-    const model = await loadModel(MODEL_JSON, MODEL_B64);
     await player.setAudio(section, sr, notes);
     S.notes = notes;
     S.chords = [];
     S.playChords = [];
     renderChart();
     draw(true);
-    const t0 = performance.now();
-    for (let c0 = 0; c0 < dur - 0.05; c0 += CHUNK) {
-      if (S.stopAsked) break;
-      const c1 = Math.min(dur, c0 + CHUNK);
-      const s0 = Math.max(0, c0 - CONTEXT);
-      const s1 = Math.min(dur, c1 + CONTEXT);
-      const piece = await resampleMono(section.subarray(Math.floor(s0 * sr), Math.floor(s1 * sr)), sr, MODEL_RATE);
-      const raw = await transcribe(model, piece, $('sens').value, p => {
-        const done = (c0 + p * (c1 - c0)) / dur;
-        const el = (performance.now() - t0) / 1000;
-        const eta = done > 0.02 ? Math.max(0, el / done - el) : null;
-        setProgress(0.02 + done * 0.98, 'Writing out the notes: ' + fmt(a + c0 + p * (c1 - c0)) + ' of ' + fmt(b) + (eta !== null ? ' · about ' + fmtEta(eta) + ' left' : ''));
-      }, () => S.stopAsked);
-      if (raw === null) break;
-      const last = c1 >= dur - 0.05;
-      const fresh = cleanNotes(raw)
-        .map(n => ({ t: n.t + s0, d: n.d, p: n.p, a: n.a }))
-        .filter(n => n.t >= c0 && (n.t < c1 || last));
-      for (const n of fresh) notes.push(n);
-      notes.sort((x, y) => x.t - y.t || x.p - y.p);
-      player.setNotes(notes);
-      if (notes.length) {
-        analyze(notes, c1);
-        $('sourceNote').textContent = 'Done up to ' + fmt(a + c1) + ' of ' + fmt(b) + '. You can play what is ready while the rest is written out.';
+    let engine = $('engine').value;
+    if (engine === 'piano') {
+      try {
+        await transcribePiano(section, sr, notes, ctx);
+      } catch (e) {
+        if (notes.length || S.stopAsked) throw e;
+        console.warn('Piano model unavailable', e);
+        showError('The piano model could not run in this browser (' + (e.message || 'unknown error') + '). Using the quick model instead.');
+        engine = 'quick';
       }
-      // Let the page breathe between passes.
-      await new Promise(r => setTimeout(r, 0));
     }
+    if (engine === 'quick') await transcribeQuick(section, sr, notes, ctx);
     hideProgress();
     if (!notes.length) {
       showError('No piano notes were found in this part. Try High sensitivity, or pick a part where the piano plays.');
     } else {
       analyze(notes, dur);
       const stopped = S.stopAsked;
-      $('sourceNote').textContent = (stopped ? 'Stopped. ' : '') + 'Transcribed ' + fmt(a) + ' to ' + fmt(stopped ? a + (notes[notes.length - 1].t + notes[notes.length - 1].d) : b) + ': ' + notes.length + ' notes, ' + S.playChords.length + ' chord changes.';
-      const gpu = backendName() === 'webgl';
-      $('engineInfo').textContent = 'Model ran on ' + (gpu ? 'the graphics chip' : 'the processor') + '.';
-      if (!gpu) showError('This browser is not letting KeyShift use the graphics chip, so long files are slow. In Chrome: Settings, System, turn on graphics acceleration.');
+      const end = stopped ? a + Math.min(dur, ctx.done) : b;
+      $('sourceNote').textContent = (stopped ? 'Stopped. ' : '') + 'Transcribed ' + fmt(a) + ' to ' + fmt(end) + ': ' + notes.length + ' notes, ' + S.playChords.length + ' chord changes.';
+      $('engineInfo').textContent = engineLine(engine);
     }
   } catch (e) {
     console.error(e);
@@ -685,6 +670,105 @@ async function runTranscribe() {
   S.stopAsked = false;
   setBusy(false);
   draw(true);
+}
+
+function engineLine(engine) {
+  if (engine === 'piano') {
+    const info = engineInfo();
+    if (!info) return '';
+    return 'Notes by the piano model (hFT-Transformer), running on ' + (info.gpu ? 'the graphics chip.' : 'the processor' + (info.threads > 1 ? ' with ' + info.threads + ' threads.' : '.'));
+  }
+  return 'Notes by the quick model (Basic Pitch), running on ' + (backendName() === 'webgl' ? 'the graphics chip.' : 'the processor.');
+}
+
+function reportProgress(ctx, doneSec, label) {
+  const done = Math.min(1, doneSec / ctx.dur);
+  const el = (performance.now() - ctx.t0) / 1000;
+  const eta = done > 0.02 && el > 3 ? Math.max(0, el / done - el) : null;
+  setProgress(0.02 + done * 0.98, label + ': ' + fmt(ctx.a + doneSec) + ' of ' + fmt(ctx.b) + (eta !== null ? ' · about ' + fmtEta(eta) + ' left' : ''));
+  return { el, eta };
+}
+
+function publish(notes, uptoSec, ctx) {
+  player.setNotes(notes);
+  if (notes.length) {
+    analyze(notes, uptoSec);
+    $('sourceNote').textContent = 'Done up to ' + fmt(ctx.a + uptoSec) + ' of ' + fmt(ctx.b) + '. You can play what is ready while the rest is written out.';
+  }
+}
+
+// Piano model: 128-frame blocks (2.05 s) with real neighbouring audio as context, exactly as the
+// model's own inference code walks a file, so splitting the work changes nothing in the result.
+async function transcribePiano(section, sr, notes, ctx) {
+  setProgress(0.01, 'Loading the piano model…');
+  await loadHftEngine(ASSET_BASE, msg => setProgress(0.01, msg));
+  setProgress(0.015, 'Preparing audio…');
+  const audio16 = await resampleMono(section, sr, HFT.SR);
+  const nF = frameCount(audio16.length);
+  const nB = Math.ceil(nF / HFT.BLOCK);
+  const size = nB * HFT.BLOCK * 88;
+  const on = new Float32Array(size), off = new Float32Array(size), mpe = new Float32Array(size);
+  const vel = new Uint8Array(size);
+  const thr = HFT_SENSITIVITY[$('sens').value] || HFT_SENSITIVITY.normal;
+  const fps = HFT.SR / HFT.HOP;
+  ctx.t0 = performance.now();
+  let slowHint = false;
+  for (let blk = 0; blk < nB; blk++) {
+    if (S.stopAsked) break;
+    const { spec, T } = blockInput(audio16, nF, blk);
+    const out = await runBlock(spec, T);
+    const at = blk * HFT.BLOCK * 88;
+    on.set(out.onset, at);
+    off.set(out.offset, at);
+    mpe.set(out.mpe, at);
+    vel.set(out.velocity, at);
+    const framesDone = Math.min(nF, (blk + 1) * HFT.BLOCK);
+    ctx.done = framesDone / fps;
+    const { el, eta } = reportProgress(ctx, ctx.done, 'Writing out the notes');
+    if (!slowHint && eta !== null && el > 20 && eta > 10 * 60) {
+      slowHint = true;
+      $('sourceNote').textContent = 'This computer is slow with the piano model. For a faster rough result, set Accuracy to Quick and press Transcribe again.';
+    }
+    if ((blk + 1) % HFT_CHUNK_BLOCKS === 0 || blk === nB - 1) {
+      const fresh = extractNotes(on, off, mpe, vel, framesDone, thr);
+      notes.length = 0;
+      for (const n of fresh) if (n.t < ctx.dur) notes.push(n);
+      publish(notes, ctx.done, ctx);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  if (S.stopAsked) {
+    const fresh = extractNotes(on, off, mpe, vel, Math.min(nF, Math.round(ctx.done * fps)), thr);
+    notes.length = 0;
+    for (const n of fresh) notes.push(n);
+  }
+}
+
+async function transcribeQuick(section, sr, notes, ctx) {
+  setProgress(0.01, 'Loading the quick model…');
+  const model = await loadModel(MODEL_JSON, MODEL_B64);
+  const dur = ctx.dur;
+  ctx.t0 = performance.now();
+  for (let c0 = 0; c0 < dur - 0.05; c0 += CHUNK) {
+    if (S.stopAsked) break;
+    const c1 = Math.min(dur, c0 + CHUNK);
+    const s0 = Math.max(0, c0 - CONTEXT);
+    const s1 = Math.min(dur, c1 + CONTEXT);
+    const piece = await resampleMono(section.subarray(Math.floor(s0 * sr), Math.floor(s1 * sr)), sr, MODEL_RATE);
+    const raw = await transcribe(model, piece, $('sens').value, p => {
+      reportProgress(ctx, c0 + p * (c1 - c0), 'Writing out the notes (quick)');
+    }, () => S.stopAsked);
+    if (raw === null) break;
+    const last = c1 >= dur - 0.05;
+    const fresh = raw
+      .map(n => ({ t: n.t + s0, d: n.d, p: n.p, a: n.a }))
+      .filter(n => n.t >= c0 && (n.t < c1 || last));
+    for (const n of fresh) notes.push(n);
+    notes.sort((x, y) => x.t - y.t || x.p - y.p);
+    ctx.done = c1;
+    publish(notes, c1, ctx);
+    await new Promise(r => setTimeout(r, 0));
+  }
 }
 
 function fmtEta(sec) {
@@ -776,12 +860,22 @@ async function save(kind) {
 
 /* ---------- Start ---------- */
 
-function loadDemo() {
+async function loadDemo() {
+  // The example is a real grand-piano recording (Salamander samples); its notes were written out
+  // by the same piano model the app uses.
+  const notes = DEMO_NOTES.map(([t, d, p, a]) => ({ t, d, p, a }));
   const sr = 44100;
-  const data = renderDemo(sr);
+  let data;
+  try {
+    const r = await fetch(new URL('demo.mp3', ASSET_BASE).href);
+    const decoded = await new OfflineAudioContext(1, 1, sr).decodeAudioData(await r.arrayBuffer());
+    data = decoded.getChannelData(0).slice();
+  } catch (e) {
+    console.warn('Example recording unavailable', e);
+    data = new Float32Array(Math.ceil((notes[notes.length - 1].t + 3) * sr));
+  }
   S.mono = data;
   S.sr = sr;
-  const notes = cleanNotes(DEMO_NOTES.map(([t, d, p, a]) => ({ t, d, p, a })));
   player.audio = data;
   player.sampleRate = sr;
   player.notes = notes;
@@ -795,9 +889,12 @@ function loadDemo() {
   S.dir = store.get('dir', 'nearest');
   recompute();
   // Rest just inside the first chord so the keyboard shows its full shape.
-  if (S.playChords.length) player.pausedPos = S.playChords[0].start + 0.3;
+  if (S.notes.length) player.pausedPos = S.notes[0].t + 0.5;
   draw(true);
 }
+
+// Read-only hook for automated tests.
+window.__keyshift = { notes: () => S.notes.map(n => ({ ...n })), chords: () => (S.playChords || []).length, player };
 
 function init() {
   fillKeySelects();
@@ -825,6 +922,8 @@ function init() {
     runTranscribe();
   });
   $('sens').addEventListener('change', () => store.set('sens', $('sens').value));
+  $('engine').value = store.get('engine', 'piano');
+  $('engine').addEventListener('change', () => store.set('engine', $('engine').value));
 
   $('fromKey').addEventListener('change', () => { S.fromId = $('fromKey').value; S.fromManual = true; recompute(); });
   $('fromMode').addEventListener('change', () => { S.fromMode = $('fromMode').value; S.fromManual = true; recompute(); });
@@ -867,8 +966,8 @@ function init() {
   bindScrub();
   setupRecording();
   setHear('audio');
-  loadDemo();
   requestAnimationFrame(frame);
+  loadDemo();
 }
 
 init();
