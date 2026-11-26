@@ -923,6 +923,13 @@ function init() {
   });
   $('sens').addEventListener('change', () => store.set('sens', $('sens').value));
   $('engine').value = store.get('engine', 'piano');
+  if (insideClaude()) {
+    // Claude's page host cannot serve the piano model's files, so only the quick model runs here.
+    const opt = $('engine').querySelector('option[value="piano"]');
+    opt.disabled = true;
+    opt.textContent = 'Best: piano model (on phinow.github.io/keyshift)';
+    $('engine').value = 'quick';
+  }
   $('engine').addEventListener('change', () => store.set('engine', $('engine').value));
 
   $('fromKey').addEventListener('change', () => { S.fromId = $('fromKey').value; S.fromManual = true; recompute(); });
